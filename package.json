@@ -1,0 +1,8 @@
+{
+  "name": "shopify-printful-webhook",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "A minimal serverless function for Shopify to Printful order forwarding on Vercel.",
+  "main": "api/shopify-webhook.js",
+  "license": "MIT"
+}
