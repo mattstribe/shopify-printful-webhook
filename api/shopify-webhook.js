@@ -14,6 +14,7 @@ async function getHandleByProductId(id) {
 function artUrlFromHandle(handle) {
   const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
   return `${base}/${handle}.png`; // <— flat files named exactly like the handle
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
