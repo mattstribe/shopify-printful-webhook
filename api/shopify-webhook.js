@@ -1,6 +1,20 @@
 import crypto from "crypto";
 import { skuToVariant } from "./sku-map.js";
 
+async function getHandleByProductId(id) {
+  const url = `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/2025-01/products/${id}.json`;
+  const r = await fetch(url, {
+    headers: { "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN }
+  });
+  if (!r.ok) throw new Error(`Shopify get product ${id} failed: ${r.status}`);
+  const { product } = await r.json();
+  return product.handle; // e.g. "Caribou_Cup"
+}
+
+function artUrlFromHandle(handle) {
+  const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
+  return `${base}/${handle}.png`; // <— flat files named exactly like the handle
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
@@ -46,22 +60,60 @@ export default async function handler(req, res) {
 
   // ----- Map line items → Printful items
   const missing = [];
-  const items = (order.line_items || []).map((li) => {
-    const vId = skuToVariant[li.sku];
-    if (!vId) missing.push(li.sku || `(no sku: ${li.title})`);
-    return vId
-      ? { variant_id: vId, quantity: li.quantity ?? 1 }
-      : null;
-  }).filter(Boolean);
-
+  const items = [];
+  
+  for (const li of (order.line_items || [])) {
+    // 1) Shared size SKUs → catalog variant_id
+    const vId = li?.sku ? skuToVariant[li.sku] : undefined;
+    if (!vId) { missing.push(li?.sku || `(no sku: ${li?.title})`); continue; }
+  
+    // 2) Get the product handle from Shopify
+    let handle;
+    try {
+      handle = await getHandleByProductId(li.product_id); // e.g. "Caribou_Cup"
+    } catch (e) {
+      console.error("handle lookup failed", li.product_id, e);
+      return res.status(200).json({ ok:false, reason:"handle_lookup_failed", product_id: li.product_id });
+    }
+  
+    // 3) Build image URL from handle and upload to Printful Files
+    const fileUrl = artUrlFromHandle(handle);
+    const fr = await fetch("https://api.printful.com/files", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ url: fileUrl })
+    });
+    const ft = await fr.text();
+    if (!fr.ok) {
+      console.error("[printful] file upload failed:", fr.status, ft);
+      return res.status(200).json({
+        ok:false,
+        reason:"file_upload_failed",
+        status: fr.status,
+        handle,
+        fileUrl,
+        body: safeJson(ft)
+      });
+    }
+    const fileRes = safeJson(ft);
+    const fileId = fileRes?.result?.id;
+  
+    // 4) Push item with artwork attached
+    items.push({
+      variant_id: vId,                 // your blank shirt for the size
+      quantity: li.quantity ?? 1,
+      files: [{ type: "default", id: fileId }] // DTG front
+    });
+  }
+  
   if (items.length === 0) {
-    console.error("[webhook] No items mapped. Missing SKUs:", missing);
-    // 200 so Shopify doesn’t keep retrying forever; you’ll see the error in logs.
-    return res.status(200).json({ ok: false, reason: "No mapped SKUs", missing });
+    console.error("[webhook] No valid items. Missing SKUs:", missing);
+    return res.status(200).json({ ok:false, reason:"No valid items", missing });
   }
-  if (missing.length) {
-    console.warn("[webhook] Some SKUs missing mapping (order still forwarded):", missing);
-  }
+  
 
   // ----- Build Printful order payload
   const printfulOrder = {
