@@ -69,6 +69,7 @@ export default async function handler(req, res) {
     items,
     external_id: `shopify-${order.id}`, // useful to cross-reference
     shipping: "STANDARD",
+    store_id: Number(process.env.PRINTFUL_STORE_ID),
   };
 
   // ----- Send to Printful
@@ -78,6 +79,7 @@ export default async function handler(req, res) {
       headers: {
         Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
         "Content-Type": "application/json",
+        "X-PF-Store-Id": process.env.PRINTFUL_STORE_ID,
       },
       body: JSON.stringify(printfulOrder),
     });
