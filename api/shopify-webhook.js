@@ -1,5 +1,8 @@
 import crypto from "crypto";
-import { skuToVariant } from "./sku-map.js";
+import { productColorSizeToVariant } from "./variant-map.js";
+
+// (keep your existing helpers: shopDomain, getHandleByProductId, artUrlFromHandle, getRawBody, safeJson)
+// and your file upload + order POST blocks
 
 // before building the URL, sanitize the domain
 function shopDomain() {
@@ -87,35 +90,42 @@ export default async function handler(req, res) {
   const items = [];
   
   for (const li of (order.line_items || [])) {
-    // 1) Shared size SKUs → catalog variant_id
-    const vId = li?.sku ? skuToVariant[li.sku] : undefined;
-    if (!vId) { missing.push(li?.sku || `(no sku: ${li?.title})`); continue; }
+    // --- Parse the structured SKU
+    const parsed = parseStructuredSku(li?.sku);
+    if (!parsed) {
+      missing.push(li?.sku || `(no sku: ${li?.title})`);
+      continue;
+    }
   
-    // 2) Get the product handle from Shopify
+    const { templateId, variantKey } = parsed;
+  
+    // --- Resolve catalog variant_id from PRODUCT_COLOR_SIZE
+    const vId = productColorSizeToVariant[variantKey];
+    if (!vId) {
+      console.error("[map] No variant_id for", variantKey, "from SKU", li?.sku);
+      missing.push(li?.sku || `(bad sku map: ${variantKey})`);
+      continue;
+    }
+  
+    // --- Get product handle
     let handle;
     try {
-      handle = await getHandleByProductId(li.product_id); // e.g. "Caribou_Cup"
+      handle = await getHandleByProductId(li.product_id); // e.g., "caribou-cup"
     } catch (e) {
       console.error("handle lookup failed", li.product_id, e);
       return res.status(200).json({ ok:false, reason:"handle_lookup_failed", product_id: li.product_id });
     }
   
-    // 3) Build image URL from handle and upload to Printful Files
+    // --- Build art URL from handle and upload to Printful Files
     const fileUrl = artUrlFromHandle(handle);
-    
-    // --- DEBUG: log the resolved values
-    console.log("[debug] handle:", handle);
-    console.log("[debug] ART_BASE_URL:", (process.env.ART_BASE_URL || "").replace(/\/+$/, ""));
-    console.log("[debug] fileUrl:", fileUrl);
-    
+    console.log("[debug] sku:", li?.sku, "| variantKey:", variantKey, "| templateId:", templateId, "| fileUrl:", fileUrl);
+  
     const storeId = process.env.PRINTFUL_STORE_ID;
     if (!storeId) {
       console.error("[printful] Missing PRINTFUL_STORE_ID env");
       return res.status(200).json({ ok:false, reason:"missing_store_id_env" });
     }
-    
-    console.log("[debug] uploading to Printful Files with store:", storeId);
-    
+  
     const fr = await fetch("https://api.printful.com/files", {
       method: "POST",
       headers: {
@@ -123,38 +133,25 @@ export default async function handler(req, res) {
         "Content-Type": "application/json",
         "X-PF-Store-Id": storeId,
       },
-      body: JSON.stringify({
-        url: fileUrl,
-        store_id: Number(storeId),
-      }),
+      body: JSON.stringify({ url: fileUrl, store_id: Number(storeId) }),
     });
-    
     const ft = await fr.text();
-    
-    // --- DEBUG: log upload results
-    console.log("[debug] files upload status:", fr.status);
-    console.log("[debug] files upload response:", ft);
-    
+    console.log("[debug] files upload status:", fr.status, "| resp:", ft);
     if (!fr.ok) {
       console.error("[printful] file upload failed:", fr.status, ft);
       return res.status(200).json({
-        ok:false,
-        reason:"file_upload_failed",
-        status: fr.status,
-        handle,
-        fileUrl,
-        body: safeJson(ft)
+        ok:false, reason:"file_upload_failed", status: fr.status, handle, fileUrl, body: safeJson(ft)
       });
     }
-
     const fileRes = safeJson(ft);
     const fileId = fileRes?.result?.id;
   
-    // 4) Push item with artwork attached
+    // --- Build the Printful item. Use BOTH: variant_id and template_id from SKU.
     items.push({
-      variant_id: vId,                 // your blank shirt for the size
+      variant_id: vId,                       // size + color (catalog variant)
       quantity: li.quantity ?? 1,
-      files: [{ type: "default", id: fileId }] // DTG front
+      template_id: templateId,               // placement/scale comes from the template
+      files: [{ type: "default", id: fileId }]
     });
   }
   
@@ -162,6 +159,7 @@ export default async function handler(req, res) {
     console.error("[webhook] No valid items. Missing SKUs:", missing);
     return res.status(200).json({ ok:false, reason:"No valid items", missing });
   }
+
   
 
   // ----- Build Printful order payload
