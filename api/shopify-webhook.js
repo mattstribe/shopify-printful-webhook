@@ -86,14 +86,26 @@ export default async function handler(req, res) {
   
     // 3) Build image URL from handle and upload to Printful Files
     const fileUrl = artUrlFromHandle(handle);
-    const fr = await fetch("https://api.printful.com/files", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ url: fileUrl })
-    });
+   const storeId = process.env.PRINTFUL_STORE_ID;
+
+if (!storeId) {
+  console.error("[printful] Missing PRINTFUL_STORE_ID env");
+  return res.status(200).json({ ok:false, reason:"missing_store_id_env" });
+}
+
+const fr = await fetch("https://api.printful.com/files", {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
+    "Content-Type": "application/json",
+    "X-PF-Store-Id": storeId,                       // ← add header
+  },
+  body: JSON.stringify({
+    url: fileUrl,
+    store_id: Number(storeId),                      // ← add in body too (belt & suspenders)
+  }),
+});
+
     const ft = await fr.text();
     if (!fr.ok) {
       console.error("[printful] file upload failed:", fr.status, ft);
