@@ -1,7 +1,7 @@
-// /api/printful-webhook.js  (ESM, Vercel serverless)
+// /api/printful-webhook.js  (ESM)
 import crypto from "crypto";
 
-// ——— raw body helper (so HMAC matches exactly)
+// raw body for signature verification
 function getRawBody(req) {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -11,36 +11,32 @@ function getRawBody(req) {
   });
 }
 
-// ——— verify Printful signature
-function verifyPrintfulSignature(raw) {
-  const sig = (this.headers?.["x-pf-signature"] || this.headers?.["X-PF-Signature"] || "").toString();
+function verifySignature(headers, raw) {
+  const sig = String(headers["x-pf-signature"] || headers["X-PF-Signature"] || "");
   const secret = process.env.PRINTFUL_WEBHOOK_SECRET || "";
   if (!sig || !secret) return false;
   const digest = crypto.createHmac("sha256", secret).update(raw, "utf8").digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(digest));
+  // timingSafeEqual requires same-length buffers
+  return sig.length === digest.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(digest));
 }
 
-// ——— shop domain sanitize
 function shopDomain() {
-  return (process.env.SHOPIFY_STORE_DOMAIN || "")
-    .replace(/^https?:\/\//, "")
-    .replace(/\/+$/, "");
+  return (process.env.SHOPIFY_STORE_DOMAIN || "").replace(/^https?:\/\//, "").replace(/\/+$/, "");
 }
 
-// ——— Shopify helpers
+// --- Shopify helpers
 async function getShopifyOrder(orderId) {
   const url = `https://${shopDomain()}/admin/api/2025-01/orders/${orderId}.json`;
-  const r = await fetch(url, {
-    headers: { "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN }
-  });
+  const r = await fetch(url, { headers: { "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN } });
   if (!r.ok) throw new Error(`Shopify get order ${orderId} failed: ${r.status}`);
   const { order } = await r.json();
   return order;
 }
 
+// Create fulfillment by line_item IDs (simple path). If you prefer Fulfillment Orders API, we can switch later.
 async function createShopifyFulfillment({ orderId, tracking, lineItemIds }) {
   const url = `https://${shopDomain()}/admin/api/2025-01/orders/${orderId}/fulfillments.json`;
-  const body = {
+  const payload = {
     fulfillment: {
       location_id: Number(process.env.SHOPIFY_LOCATION_ID),
       tracking_company: tracking?.company || tracking?.carrier || "Carrier",
@@ -56,16 +52,15 @@ async function createShopifyFulfillment({ orderId, tracking, lineItemIds }) {
       "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(payload),
   });
   const text = await r.text();
   if (!r.ok) throw new Error(`Shopify fulfill err ${r.status}: ${text}`);
   return JSON.parse(text);
 }
 
-// ——— extractors tolerant to Printful payload shapes
-function getExternalId(payload) {
-  // we set external_id = "shopify-<id>" when creating the order
+// Extract `shopify-<id>` we set in external_id when creating Printful orders
+function extractShopifyId(payload) {
   const ext = payload?.data?.order?.external_id
            || payload?.order?.external_id
            || payload?.external_id
@@ -74,72 +69,54 @@ function getExternalId(payload) {
   return m ? m[1] : null;
 }
 
-function getShipments(payload) {
-  // typical: payload.data.shipments[…]
-  return payload?.data?.shipments
-      || payload?.shipments
-      || [];
+function shipmentsFrom(payload) {
+  return payload?.data?.shipments || payload?.shipments || [];
 }
 
-// ——— main handler
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   const raw = await getRawBody(req);
-  // bind headers to verify function
-  const verify = verifyPrintfulSignature.bind({ headers: req.headers });
-  if (!verify(raw)) {
-    console.error("[pf-webhook] bad signature");
+  if (!verifySignature(req.headers, raw)) {
+    console.error("[printful-webhook] invalid signature");
     return res.status(401).send("Invalid signature");
   }
 
   let body;
-  try { body = JSON.parse(raw); }
-  catch { return res.status(400).send("Invalid JSON"); }
+  try { body = JSON.parse(raw); } catch { return res.status(400).send("Invalid JSON"); }
 
   const event = body?.event || body?.type || "unknown";
-  const shopifyOrderId = getExternalId(body);
+  const shopifyOrderId = extractShopifyId(body);
+  console.log("[printful-webhook]", { event, shopifyOrderId });
 
-  console.log("[pf-webhook] event:", event, "external shopify id:", shopifyOrderId);
+  if (!shopifyOrderId) return res.status(200).json({ ok: true, ignored: "no_external_id" });
 
-  // We care about shipments
-  if (!shopifyOrderId) {
-    console.warn("[pf-webhook] missing external_id → cannot map to Shopify order");
-    return res.status(200).json({ ok: true, ignored: true });
-  }
-
-  // Only react on package shipped / order updated with shipments
   const isShipmentEvent = /package_shipped|order_updated|order_fulfilled/i.test(event);
-  if (!isShipmentEvent) {
-    return res.status(200).json({ ok: true, ignored: true });
-  }
+  if (!isShipmentEvent) return res.status(200).json({ ok: true, ignored: "event_not_shipment" });
 
-  const shipments = getShipments(body);
+  const shipments = shipmentsFrom(body);
   if (!Array.isArray(shipments) || shipments.length === 0) {
-    console.log("[pf-webhook] no shipments attached; nothing to do");
+    console.log("[printful-webhook] no shipments");
     return res.status(200).json({ ok: true, noShipments: true });
   }
 
-  // Fetch Shopify order to get fulfillable line_item IDs
   let shopifyOrder;
   try {
     shopifyOrder = await getShopifyOrder(shopifyOrderId);
   } catch (e) {
-    console.error("[pf-webhook] cannot fetch Shopify order:", e);
+    console.error("[printful-webhook] fetch shopify order failed:", e);
     return res.status(200).json({ ok: false, reason: "shopify_fetch_failed" });
   }
 
-  // Choose line items that still need fulfillment
   const fulfillableLineItemIds = (shopifyOrder.line_items || [])
     .filter(li => (li.fulfillable_quantity ?? 0) > 0)
     .map(li => li.id);
 
   if (fulfillableLineItemIds.length === 0) {
-    console.log("[pf-webhook] nothing fulfillable for Shopify order", shopifyOrderId);
+    console.log("[printful-webhook] nothing fulfillable");
     return res.status(200).json({ ok: true, alreadyFulfilled: true });
   }
 
-  // Create one fulfillment per shipment (you could also group)
   try {
     const results = [];
     for (const s of shipments) {
@@ -155,10 +132,10 @@ export default async function handler(req, res) {
       });
       results.push(resp);
     }
-    console.log("[pf-webhook] fulfillments created for order", shopifyOrderId);
+    console.log("[printful-webhook] fulfillment(s) created");
     return res.status(200).json({ ok: true, fulfillments: results });
   } catch (e) {
-    console.error("[pf-webhook] fulfillment create failed:", e);
+    console.error("[printful-webhook] fulfillment create failed:", e);
     return res.status(200).json({ ok: false, reason: "fulfillment_failed" });
   }
 }
