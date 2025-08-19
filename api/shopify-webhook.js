@@ -8,6 +8,22 @@ function shopDomain() {
     .replace(/\/+$/, "");          // remove trailing slashes
 }
 
+// Parses "TEMPLATEID_PRODUCTCODE_COLOR_SIZE"
+// Returns { templateId (number), variantKey: "PRODUCTCODE_COLOR_SIZE" }
+function parseStructuredSku(rawSku = "") {
+  // Normalize: trim, force uppercase
+  const sku = String(rawSku).trim();
+  const parts = sku.split("_");
+  if (parts.length !== 4) return null;
+
+  const [templateStr, productCode, color, size] = parts;
+  const templateId = Number(templateStr);
+  if (!Number.isFinite(templateId) || templateId <= 0) return null;
+
+  const variantKey = [productCode, color, size].map(s => String(s).toUpperCase()).join("_");
+  return { templateId, variantKey };
+}
+
 async function getHandleByProductId(id) {
   const url = `https://${shopDomain()}/admin/api/2025-01/products/${id}.json`;
   const r = await fetch(url, {
