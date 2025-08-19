@@ -1,14 +1,21 @@
 import crypto from "crypto";
 import { skuToVariant } from "./sku-map.js";
 
+// before building the URL, sanitize the domain
+function shopDomain() {
+  return (process.env.SHOPIFY_STORE_DOMAIN || "")
+    .replace(/^https?:\/\//, "")   // remove protocol if present
+    .replace(/\/+$/, "");          // remove trailing slashes
+}
+
 async function getHandleByProductId(id) {
-  const url = `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/2025-01/products/${id}.json`;
+  const url = `https://${shopDomain()}/admin/api/2025-01/products/${id}.json`;
   const r = await fetch(url, {
     headers: { "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN }
   });
   if (!r.ok) throw new Error(`Shopify get product ${id} failed: ${r.status}`);
   const { product } = await r.json();
-  return product.handle; // e.g. "Caribou_Cup"
+  return product.handle;
 }
 
 function artUrlFromHandle(handle) {
