@@ -1,44 +1,30 @@
-// /api/printful-register-webhook.js
+// pages/api/printful-register-webhook.js
 export default async function handler(req, res) {
-  // Allow GET so you can just click it in the browser
-  if (req.method !== "GET" && req.method !== "POST") {
-    return res.status(405).send("Use GET or POST");
-  }
-
-  const storeId = Number(process.env.PRINTFUL_STORE_ID);
-  const secret = process.env.PRINTFUL_WEBHOOK_SECRET || "";
-  const baseUrl = (process.env.APP_BASE_URL || "").replace(/\/+$/, "");
-  const url = `${baseUrl}/api/printful-webhook`;
-
-  if (!storeId || !secret || !baseUrl) {
-    return res.status(400).json({
-      ok: false,
-      missing: {
-        PRINTFUL_STORE_ID: !!storeId,
-        PRINTFUL_WEBHOOK_SECRET: !!secret,
-        APP_BASE_URL: !!baseUrl,
-      }
-    });
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
-    const r = await fetch("https://api.printful.com/webhooks", {
+    const response = await fetch("https://api.printful.com/webhooks", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
+        "Authorization": `Bearer ${process.env.PRINTFUL_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        url,                 // where Printful will POST
-        secret,              // we’ll verify with this in /api/printful-webhook
-        types: ["package_shipped", "order_updated"],
-        store_id: storeId,
+        url: `${process.env.APP_BASE_URL}/api/printful-webhook`, // where Printful will POST updates
+        types: ["order_created", "order_updated", "package_shipped"], // choose events you want
       }),
     });
 
-    const text = await r.text();
-    return res.status(r.ok ? 200 : 500).send(text);
-  } catch (e) {
-    return res.status(500).send(String(e));
+    const data = await response.json();
+
+    if (!response.ok) {
+      return res.status(response.status).json({ error: data });
+    }
+
+    return res.status(200).json({ success: true, data });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 }
