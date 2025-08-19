@@ -86,27 +86,39 @@ export default async function handler(req, res) {
   
     // 3) Build image URL from handle and upload to Printful Files
     const fileUrl = artUrlFromHandle(handle);
-   const storeId = process.env.PRINTFUL_STORE_ID;
-
-if (!storeId) {
-  console.error("[printful] Missing PRINTFUL_STORE_ID env");
-  return res.status(200).json({ ok:false, reason:"missing_store_id_env" });
-}
-
-const fr = await fetch("https://api.printful.com/files", {
-  method: "POST",
-  headers: {
-    Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
-    "Content-Type": "application/json",
-    "X-PF-Store-Id": storeId,                       // ← add header
-  },
-  body: JSON.stringify({
-    url: fileUrl,
-    store_id: Number(storeId),                      // ← add in body too (belt & suspenders)
-  }),
-});
-
+    
+    // --- DEBUG: log the resolved values
+    console.log("[debug] handle:", handle);
+    console.log("[debug] ART_BASE_URL:", (process.env.ART_BASE_URL || "").replace(/\/+$/, ""));
+    console.log("[debug] fileUrl:", fileUrl);
+    
+    const storeId = process.env.PRINTFUL_STORE_ID;
+    if (!storeId) {
+      console.error("[printful] Missing PRINTFUL_STORE_ID env");
+      return res.status(200).json({ ok:false, reason:"missing_store_id_env" });
+    }
+    
+    console.log("[debug] uploading to Printful Files with store:", storeId);
+    
+    const fr = await fetch("https://api.printful.com/files", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
+        "Content-Type": "application/json",
+        "X-PF-Store-Id": storeId,
+      },
+      body: JSON.stringify({
+        url: fileUrl,
+        store_id: Number(storeId),
+      }),
+    });
+    
     const ft = await fr.text();
+    
+    // --- DEBUG: log upload results
+    console.log("[debug] files upload status:", fr.status);
+    console.log("[debug] files upload response:", ft);
+    
     if (!fr.ok) {
       console.error("[printful] file upload failed:", fr.status, ft);
       return res.status(200).json({
@@ -118,6 +130,7 @@ const fr = await fetch("https://api.printful.com/files", {
         body: safeJson(ft)
       });
     }
+
     const fileRes = safeJson(ft);
     const fileId = fileRes?.result?.id;
   
