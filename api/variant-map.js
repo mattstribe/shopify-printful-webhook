@@ -12,5 +12,11 @@ export const productColorSizeToVariant = {
   "BC3001_WHT_3XL": 24357,
 
   // Gildan 18500 Black Sweatshirt
-  "G18500_BLK_S": 
+  "G18500_BLK_S": 5530,
+  "G18500_BLK_M": 5531,
+  "G18500_BLK_L": 5532,
+  "G18500_BLK_XL": 5533,
+  "G18500_BLK_2XL": 5534,
+  "G18500_BLK_3XL": 5535,
+  "G18500_BLK_4XL": 5536,
 };
