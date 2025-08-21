@@ -219,7 +219,7 @@ export default async function handler(req, res) {
     external_id: `shopify-${order.id}`, // useful to cross-reference
     shipping: "STANDARD",
     store_id: Number(process.env.PRINTFUL_STORE_ID),
-    confirm: true,
+    confirm: shouldConfirm,
   };
 
   // ----- Send to Printful
