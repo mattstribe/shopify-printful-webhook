@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import { productColorSizeToVariant } from "./variant-map.js";
 
-// helpers
+// ---- Helpers
 function shopDomain() {
   return (process.env.SHOPIFY_STORE_DOMAIN || "")
     .replace(/^https?:\/\//, "")
@@ -136,17 +136,17 @@ export default async function handler(req, res) {
 
   if (items.length === 0) return res.status(200).json({ ok:false, reason:"No valid items", missing });
 
-  // ---- Create Printful order AFTER all files uploaded
-  const printfulOrder = {
+  const draftOrder = {
     recipient,
     items,
     external_id: `NBHL-${order.order_number || order.id}`,
     shipping: "STANDARD",
     store_id: Number(process.env.PRINTFUL_STORE_ID),
-    confirm: true, // <-- now should auto-confirm
+    confirm: false, // <-- create draft first
   };
 
   try {
+    // ---- Step 1: Create draft
     const r = await fetch("https://api.printful.com/orders", {
       method: "POST",
       headers: {
@@ -154,16 +154,29 @@ export default async function handler(req, res) {
         "Content-Type": "application/json",
         "X-PF-Store-Id": process.env.PRINTFUL_STORE_ID,
       },
-      body: JSON.stringify(printfulOrder),
+      body: JSON.stringify(draftOrder),
     });
-    const text = await r.text();
-    const payload = safeJson(text);
-    console.log("[printful] Order created:", payload?.result?.id);
-    return res.status(200).json({ ok: true, printful: payload, missing });
+    const draftPayload = await r.json();
+    const orderId = draftPayload?.result?.id;
+
+    if (!orderId) throw new Error("Draft order creation failed");
+
+    // ---- Step 2: Confirm the draft
+    const confirmRes = await fetch(`https://api.printful.com/orders/${orderId}/confirm`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
+        "X-PF-Store-Id": process.env.PRINTFUL_STORE_ID,
+      },
+    });
+    const confirmPayload = await confirmRes.json();
+    console.log("[printful] Order confirmed:", confirmPayload?.result?.id);
+
+    return res.status(200).json({ ok: true, draft: draftPayload, confirmed: confirmPayload, missing });
 
   } catch (err) {
-    console.error("[printful] Network/Fetch failure:", err);
-    return res.status(200).json({ ok: false, error: String(err) });
+    console.error("[printful] Order creation/confirmation failed:", err);
+    return res.status(200).json({ ok: false, error: String(err), missing });
   }
 }
 
@@ -175,7 +188,4 @@ function getRawBody(req) {
     req.on("end", () => resolve(data));
     req.on("error", reject);
   });
-}
-function safeJson(text) {
-  try { return JSON.parse(text); } catch { return { raw: text }; }
 }
