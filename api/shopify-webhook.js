@@ -42,6 +42,12 @@ function artUrlFromHandle(handle) {
   return `${base}/${handle}.png`; // <— flat files named exactly like the handle
 }
 
+// Build a CDN URL for a template-driven placement, e.g. 91250834_back_large.png
+function placementArtUrl(templateId, placement) {
+  const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
+  return `${base}/${templateId}_${placement}.png`;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
@@ -125,7 +131,8 @@ export default async function handler(req, res) {
       console.error("[printful] Missing PRINTFUL_STORE_ID env");
       return res.status(200).json({ ok:false, reason:"missing_store_id_env" });
     }
-  
+
+  // Upload main artwork file
     const fr = await fetch("https://api.printful.com/files", {
       method: "POST",
       headers: {
@@ -144,14 +151,56 @@ export default async function handler(req, res) {
       });
     }
     const fileRes = safeJson(ft);
-    const fileId = fileRes?.result?.id;
+    const mainFileId = fileRes?.result?.id;
   
-    // --- Build the Printful item. Use BOTH: variant_id and template_id from SKU.
+    // --- Look for additional placement images and upload them
+    const placementFiles = [];
+    const placements = ["front", "back", "front_large", "back_large", "left_sleeve", "right_sleeve"];
+    
+    for (const placement of placements) {
+      const placementUrl = placementArtUrl(templateId, placement);
+      console.log("[debug] checking placement:", placement, "| url:", placementUrl);
+      
+      try {
+        // Check if placement file exists (you might want to implement a HEAD request check here)
+        const placementFr = await fetch("https://api.printful.com/files", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
+            "Content-Type": "application/json",
+            "X-PF-Store-Id": storeId,
+          },
+          body: JSON.stringify({ url: placementUrl, store_id: Number(storeId) }),
+        });
+        
+        if (placementFr.ok) {
+          const placementFt = await placementFr.text();
+          const placementFileRes = safeJson(placementFt);
+          const placementFileId = placementFileRes?.result?.id;
+          
+          if (placementFileId) {
+            placementFiles.push({ type: placement, id: placementFileId });
+            console.log("[debug] uploaded placement file:", placement, "| fileId:", placementFileId);
+          }
+        } else {
+          console.log("[debug] placement file not found or failed:", placement, "| status:", placementFr.status);
+        }
+      } catch (e) {
+        console.log("[debug] error checking placement:", placement, "| error:", e.message);
+      }
+    }
+  
+    // --- Build the Printful item with all placement files
+    const allFiles = [{ type: "default", id: mainFileId }];
+    if (placementFiles.length > 0) {
+      allFiles.push(...placementFiles);
+    }
+    
     items.push({
       variant_id: vId,                       // size + color (catalog variant)
       quantity: li.quantity ?? 1,
       template_id: templateId,               // placement/scale comes from the template
-      files: [{ type: "default", id: fileId }]
+      files: allFiles
     });
   }
   
@@ -160,10 +209,9 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok:false, reason:"No valid items", missing });
   }
 
-  
 
   // ----- Build Printful order payload
-  //const shouldConfirm = (process.env.PRINTFUL_CONFIRM || "true") === "true";
+  const shouldConfirm = (process.env.PRINTFUL_CONFIRM || "true") === "true";
   
   const printfulOrder = {
     recipient,
