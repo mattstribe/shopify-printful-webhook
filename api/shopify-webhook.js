@@ -222,6 +222,10 @@ export default async function handler(req, res) {
     confirm: shouldConfirm,
   };
 
+  // Debug logging to see what's being sent
+  console.log("[debug] shouldConfirm:", shouldConfirm, "| env value:", process.env.PRINTFUL_CONFIRM);
+  console.log("[debug] printfulOrder payload:", JSON.stringify(printfulOrder, null, 2));
+
   // ----- Send to Printful
   try {
     const r = await fetch("https://api.printful.com/orders", {
@@ -235,6 +239,9 @@ export default async function handler(req, res) {
     });
 
     const text = await r.text();
+    console.log("[debug] Printful API response status:", r.status);
+    console.log("[debug] Printful API response body:", text);
+    
     if (!r.ok) {
       console.error("[printful] Error:", r.status, text);
       // Return 200 so Shopify doesn’t retry. You can change to 500 if you want automatic retries.
