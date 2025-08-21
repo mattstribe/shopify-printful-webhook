@@ -151,11 +151,11 @@ export default async function handler(req, res) {
       });
     }
     const fileRes = safeJson(ft);
-    const mainFileId = fileRes?.result?.id;
+     const mainFileId = fileRes?.result?.id;
   
     // --- Look for additional placement images and upload them
     const placementFiles = [];
-    const placements = ["front", "back", "front_large", "back_large", "left_sleeve", "right_sleeve"];
+    const placements = ["front", "back", "sleeve_left", "sleeve_right"];
     
     for (const placement of placements) {
       const placementUrl = placementArtUrl(templateId, placement);
