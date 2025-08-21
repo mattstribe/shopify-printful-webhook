@@ -162,28 +162,37 @@ export default async function handler(req, res) {
       console.log("[debug] checking placement:", placement, "| url:", placementUrl);
       
       try {
-        // Check if placement file exists (you might want to implement a HEAD request check here)
-        const placementFr = await fetch("https://api.printful.com/files", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
-            "Content-Type": "application/json",
-            "X-PF-Store-Id": storeId,
-          },
-          body: JSON.stringify({ url: placementUrl, store_id: Number(storeId) }),
-        });
+        // Check if file exists at CDN before trying to upload to Printful
+        const headResponse = await fetch(placementUrl, { method: "HEAD" });
         
-        if (placementFr.ok) {
-          const placementFt = await placementFr.text();
-          const placementFileRes = safeJson(placementFt);
-          const placementFileId = placementFileRes?.result?.id;
+        if (headResponse.ok) {
+          console.log("[debug] placement file exists:", placement, "| uploading to Printful");
           
-          if (placementFileId) {
-            placementFiles.push({ type: placement, id: placementFileId });
-            console.log("[debug] uploaded placement file:", placement, "| fileId:", placementFileId);
+          // File exists, now upload to Printful
+          const placementFr = await fetch("https://api.printful.com/files", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
+              "Content-Type": "application/json",
+              "X-PF-Store-Id": storeId,
+            },
+            body: JSON.stringify({ url: placementUrl, store_id: Number(storeId) }),
+          });
+          
+          if (placementFr.ok) {
+            const placementFt = await placementFr.text();
+            const placementFileRes = safeJson(placementFt);
+            const placementFileId = placementFileRes?.result?.id;
+            
+            if (placementFileId) {
+              placementFiles.push({ type: placement, id: placementFileId });
+              console.log("[debug] successfully uploaded placement file:", placement, "| fileId:", placementFileId);
+            }
+          } else {
+            console.log("[debug] Printful upload failed for placement:", placement, "| status:", placementFr.status);
           }
         } else {
-          console.log("[debug] placement file not found or failed:", placement, "| status:", placementFr.status);
+          console.log("[debug] placement file does not exist:", placement, "| skipping");
         }
       } catch (e) {
         console.log("[debug] error checking placement:", placement, "| error:", e.message);
