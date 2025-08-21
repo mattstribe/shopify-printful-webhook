@@ -225,7 +225,7 @@ export default async function handler(req, res) {
   const printfulOrder = {
     recipient,
     items,
-    external_id: `shopify-${order.id}`, // useful to cross-reference
+    external_id: order.order_number || `shopify-${order.id}`, // Use custom order number if available
     shipping: "STANDARD",
     store_id: Number(process.env.PRINTFUL_STORE_ID),
     confirm: shouldConfirm,
