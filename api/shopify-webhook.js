@@ -139,7 +139,7 @@ export default async function handler(req, res) {
   const draftOrder = {
     recipient,
     items,
-    external_id: `NBHL-${order.order_number || order.id}`,
+    external_id: `NBHL${order.order_number || order.id}`,
     shipping: "STANDARD",
     store_id: Number(process.env.PRINTFUL_STORE_ID),
     confirm: false, // <-- create draft first
