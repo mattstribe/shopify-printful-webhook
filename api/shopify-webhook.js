@@ -1,28 +1,56 @@
 import crypto from "crypto";
+import fs from "fs";
 import { productColorSizeToVariant } from "./variant-map.js";
 
-// (keep your existing helpers: shopDomain, getHandleByProductId, artUrlFromHandle, getRawBody, safeJson)
-// and your file upload + order POST blocks
+// ---- File cache helpers ----
+const CACHE_FILE = "./printful-file-cache.json";
 
-// before building the URL, sanitize the domain
-function shopDomain() {
-  return (process.env.SHOPIFY_STORE_DOMAIN || "")
-    .replace(/^https?:\/\//, "")   // remove protocol if present
-    .replace(/\/+$/, "");          // remove trailing slashes
+function loadCache() {
+  if (!fs.existsSync(CACHE_FILE)) return {};
+  try { return JSON.parse(fs.readFileSync(CACHE_FILE, "utf8")); } 
+  catch { return {}; }
 }
 
-// Parses "TEMPLATEID_PRODUCTCODE_COLOR_SIZE"
-// Returns { templateId (number), variantKey: "PRODUCTCODE_COLOR_SIZE" }
+function saveCache(cache) {
+  fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2), "utf8");
+}
+
+async function uploadOrReuse(fileUrl) {
+  const cache = loadCache();
+  if (cache[fileUrl]) return cache[fileUrl]; // reuse cached file_id
+
+  const storeId = process.env.PRINTFUL_STORE_ID;
+  const res = await fetch("https://api.printful.com/files", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
+      "Content-Type": "application/json",
+      "X-PF-Store-Id": storeId,
+    },
+    body: JSON.stringify({ url: fileUrl, store_id: Number(storeId) }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Upload failed: ${JSON.stringify(data)}`);
+  const fileId = data?.result?.id;
+  cache[fileUrl] = fileId;
+  saveCache(cache);
+  return fileId;
+}
+
+// ---- Shopify helpers ----
+function shopDomain() {
+  return (process.env.SHOPIFY_STORE_DOMAIN || "")
+    .replace(/^https?:\/\//, "")
+    .replace(/\/+$/, "");
+}
+
 function parseStructuredSku(rawSku = "") {
-  // Normalize: trim, force uppercase
   const sku = String(rawSku).trim();
   const parts = sku.split("_");
   if (parts.length !== 4) return null;
-
   const [templateStr, productCode, color, size] = parts;
   const templateId = Number(templateStr);
   if (!Number.isFinite(templateId) || templateId <= 0) return null;
-
   const variantKey = [productCode, color, size].map(s => String(s).toUpperCase()).join("_");
   return { templateId, variantKey };
 }
@@ -39,46 +67,47 @@ async function getHandleByProductId(id) {
 
 function artUrlFromHandle(handle) {
   const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
-  return `${base}/${handle}.png`; // <— flat files named exactly like the handle
+  return `${base}/${handle}.png`;
 }
 
-// Build a CDN URL for a template-driven placement, e.g. 91250834_back_large.png
 function placementArtUrl(templateId, placement) {
   const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
   return `${base}/${templateId}_${placement}.png`;
 }
 
+function getRawBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (c) => (data += c));
+    req.on("end", () => resolve(data));
+    req.on("error", reject);
+  });
+}
+
+function safeJson(text) {
+  try { return JSON.parse(text); } catch { return { raw: text }; }
+}
+
+// ---- Main handler ----
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
-  // ----- Read raw body for HMAC verification
   const raw = await getRawBody(req);
   const hmacHeader = req.headers["x-shopify-hmac-sha256"];
-  if (!hmacHeader) {
-    console.error("[webhook] Missing HMAC header");
-    return res.status(401).send("Missing HMAC");
-  }
+  if (!hmacHeader) return res.status(401).send("Missing HMAC");
 
   const digest = crypto
     .createHmac("sha256", process.env.SHOPIFY_WEBHOOK_SECRET)
     .update(raw, "utf8")
     .digest("base64");
 
-  if (digest !== hmacHeader) {
-    console.error("[webhook] HMAC validation failed");
-    return res.status(401).send("HMAC validation failed");
-  }
+  if (digest !== hmacHeader) return res.status(401).send("HMAC validation failed");
 
-  // ----- Parse JSON safely
   let order;
-  try {
-    order = JSON.parse(raw);
-  } catch (e) {
-    console.error("[webhook] Invalid JSON:", e);
-    return res.status(400).send("Invalid JSON");
-  }
+  try { order = JSON.parse(raw); } 
+  catch (e) { return res.status(400).send("Invalid JSON"); }
 
-  // ----- Build recipient (fallbacks if missing)
+  // Recipient info
   const sa = order.shipping_address || order.customer?.default_address || {};
   const recipient = {
     name: [sa.first_name, sa.last_name].filter(Boolean).join(" ") || order.customer?.first_name || "Customer",
@@ -91,150 +120,62 @@ export default async function handler(req, res) {
     phone: sa.phone || order.customer?.phone || "",
   };
 
-  // ----- Map line items → Printful items
+  // Map line items → Printful items
   const missing = [];
   const items = [];
-  
   for (const li of (order.line_items || [])) {
-    // --- Parse the structured SKU
     const parsed = parseStructuredSku(li?.sku);
-    if (!parsed) {
-      missing.push(li?.sku || `(no sku: ${li?.title})`);
-      continue;
-    }
-  
+    if (!parsed) { missing.push(li?.sku || `(no sku: ${li?.title})`); continue; }
+
     const { templateId, variantKey } = parsed;
-  
-    // --- Resolve catalog variant_id from PRODUCT_COLOR_SIZE
     const vId = productColorSizeToVariant[variantKey];
-    if (!vId) {
-      console.error("[map] No variant_id for", variantKey, "from SKU", li?.sku);
-      missing.push(li?.sku || `(bad sku map: ${variantKey})`);
-      continue;
-    }
-  
-    // --- Get product handle
+    if (!vId) { missing.push(li?.sku || `(bad sku map: ${variantKey})`); continue; }
+
     let handle;
+    try { handle = await getHandleByProductId(li.product_id); } 
+    catch (e) { return res.status(200).json({ ok:false, reason:"handle_lookup_failed", product_id: li.product_id }); }
+
     try {
-      handle = await getHandleByProductId(li.product_id); // e.g., "caribou-cup"
-    } catch (e) {
-      console.error("handle lookup failed", li.product_id, e);
-      return res.status(200).json({ ok:false, reason:"handle_lookup_failed", product_id: li.product_id });
-    }
-  
-    // --- Build art URL from handle and upload to Printful Files
-    const fileUrl = artUrlFromHandle(handle);
-    console.log("[debug] sku:", li?.sku, "| variantKey:", variantKey, "| templateId:", templateId, "| fileUrl:", fileUrl);
-  
-    const storeId = process.env.PRINTFUL_STORE_ID;
-    if (!storeId) {
-      console.error("[printful] Missing PRINTFUL_STORE_ID env");
-      return res.status(200).json({ ok:false, reason:"missing_store_id_env" });
-    }
+      const mainFileId = await uploadOrReuse(artUrlFromHandle(handle));
 
-  // Upload main artwork file
-    const fr = await fetch("https://api.printful.com/files", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
-        "Content-Type": "application/json",
-        "X-PF-Store-Id": storeId,
-      },
-      body: JSON.stringify({ url: fileUrl, store_id: Number(storeId) }),
-    });
-    const ft = await fr.text();
-    console.log("[debug] files upload status:", fr.status, "| resp:", ft);
-    if (!fr.ok) {
-      console.error("[printful] file upload failed:", fr.status, ft);
-      return res.status(200).json({
-        ok:false, reason:"file_upload_failed", status: fr.status, handle, fileUrl, body: safeJson(ft)
-      });
-    }
-    const fileRes = safeJson(ft);
-     const mainFileId = fileRes?.result?.id;
-  
-    // --- Look for additional placement images and upload them
-    const placementFiles = [];
-    const placements = ["front", "back", "sleeve_left", "sleeve_right"];
-    
-    for (const placement of placements) {
-      const placementUrl = placementArtUrl(templateId, placement);
-      console.log("[debug] checking placement:", placement, "| url:", placementUrl);
-      
-      try {
-        // Check if file exists at CDN before trying to upload to Printful
-        const headResponse = await fetch(placementUrl, { method: "HEAD" });
-        
-        if (headResponse.ok) {
-          console.log("[debug] placement file exists:", placement, "| uploading to Printful");
-          
-          // File exists, now upload to Printful
-          const placementFr = await fetch("https://api.printful.com/files", {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
-              "Content-Type": "application/json",
-              "X-PF-Store-Id": storeId,
-            },
-            body: JSON.stringify({ url: placementUrl, store_id: Number(storeId) }),
-          });
-          
-          if (placementFr.ok) {
-            const placementFt = await placementFr.text();
-            const placementFileRes = safeJson(placementFt);
-            const placementFileId = placementFileRes?.result?.id;
-            
-            if (placementFileId) {
-              placementFiles.push({ type: placement, id: placementFileId });
-              console.log("[debug] successfully uploaded placement file:", placement, "| fileId:", placementFileId);
-            }
-          } else {
-            console.log("[debug] Printful upload failed for placement:", placement, "| status:", placementFr.status);
-          }
-        } else {
-          console.log("[debug] placement file does not exist:", placement, "| skipping");
-        }
-      } catch (e) {
-        console.log("[debug] error checking placement:", placement, "| error:", e.message);
+      // Placement files
+      const placements = ["front","back","sleeve_left","sleeve_right"];
+      const placementFiles = [];
+      for (const placement of placements) {
+        const placementUrl = placementArtUrl(templateId, placement);
+        const headRes = await fetch(placementUrl, { method: "HEAD" });
+        if (!headRes.ok) continue;
+        try {
+          const fileId = await uploadOrReuse(placementUrl);
+          placementFiles.push({ type: placement, id: fileId });
+        } catch (e) { console.log("Placement upload failed:", placement, e.message); }
       }
+
+      const allFiles = [{ type: "default", id: mainFileId }, ...placementFiles];
+      items.push({
+        variant_id: vId,
+        quantity: li.quantity ?? 1,
+        template_id: templateId,
+        files: allFiles
+      });
+    } catch (e) {
+      console.error("[uploadOrReuse] failed for", li.sku, e.message);
+      missing.push(li?.sku);
     }
-  
-    // --- Build the Printful item with all placement files
-    const allFiles = [{ type: "default", id: mainFileId }];
-    if (placementFiles.length > 0) {
-      allFiles.push(...placementFiles);
-    }
-    
-    items.push({
-      variant_id: vId,                       // size + color (catalog variant)
-      quantity: li.quantity ?? 1,
-      template_id: templateId,               // placement/scale comes from the template
-      files: allFiles
-    });
-  }
-  
-  if (items.length === 0) {
-    console.error("[webhook] No valid items. Missing SKUs:", missing);
-    return res.status(200).json({ ok:false, reason:"No valid items", missing });
   }
 
-  
+  if (items.length === 0) return res.status(200).json({ ok:false, reason:"No valid items", missing });
 
-  // ----- Build Printful order payload
-  
+  // Build Printful order
   const printfulOrder = {
     recipient,
     items,
-    external_id: `NBHL-${order.order_number || order.id}`, // Add NBHL- prefix
+    external_id: `NBHL-${order.order_number || order.id}`,
     shipping: "STANDARD",
     store_id: Number(process.env.PRINTFUL_STORE_ID),
-    confirm: true, // Force auto-confirmation
+    confirm: true, // confirm automatically
   };
 
-  // Debug logging to see what's being sent
-  console.log("[debug] printfulOrder payload:", JSON.stringify(printfulOrder, null, 2));
-
-  // ----- Send to Printful
   try {
     const r = await fetch("https://api.printful.com/orders", {
       method: "POST",
@@ -247,34 +188,11 @@ export default async function handler(req, res) {
     });
 
     const text = await r.text();
-    console.log("[debug] Printful API response status:", r.status);
-    console.log("[debug] Printful API response body:", text);
-    
-    if (!r.ok) {
-      console.error("[printful] Error:", r.status, text);
-      // Return 200 so Shopify doesn’t retry. You can change to 500 if you want automatic retries.
-      return res.status(200).json({ ok: false, printfulStatus: r.status, error: safeJson(text) });
-    }
+    if (!r.ok) return res.status(200).json({ ok: false, printfulStatus: r.status, error: safeJson(text) });
 
     const payload = safeJson(text);
-    console.log("[printful] Order created:", payload?.result?.id ?? "(no id)", "for Shopify order", order.id);
     return res.status(200).json({ ok: true, printful: payload });
   } catch (err) {
-    console.error("[printful] Network/Fetch failure:", err);
     return res.status(200).json({ ok: false, error: String(err) });
   }
 }
-
-// ---- helpers
-function getRawBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (c) => (data += c));
-    req.on("end", () => resolve(data));
-    req.on("error", reject);
-  });
-}
-function safeJson(text) {
-  try { return JSON.parse(text); } catch { return { raw: text }; }
-}
-
