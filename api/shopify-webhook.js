@@ -225,11 +225,11 @@ export default async function handler(req, res) {
   const printfulOrder = {
     recipient,
     items,
-    external_id: order.order_number || `shopify-${order.id}`, // Use custom order number if available
+    external_id: `NBHL-${order.order_number || order.id}`, // Add NBHL- prefix
     shipping: "STANDARD",
     store_id: Number(process.env.PRINTFUL_STORE_ID),
     confirm: shouldConfirm,
-  };
+};
 
   // Debug logging to see what's being sent
   console.log("[debug] shouldConfirm:", shouldConfirm, "| env value:", process.env.PRINTFUL_CONFIRM);
