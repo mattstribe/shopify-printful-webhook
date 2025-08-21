@@ -211,7 +211,7 @@ export default async function handler(req, res) {
 
 
   // ----- Build Printful order payload
-  // const shouldConfirm = (process.env.PRINTFUL_CONFIRM || "true") === "true";
+  const shouldConfirm = (process.env.PRINTFUL_CONFIRM || "true") === "true";
   
   const printfulOrder = {
     recipient,
