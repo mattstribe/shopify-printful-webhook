@@ -218,9 +218,9 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok:false, reason:"No valid items", missing });
   }
 
+  
 
   // ----- Build Printful order payload
-  const shouldConfirm = (process.env.PRINTFUL_CONFIRM || "true") === "true";
   
   const printfulOrder = {
     recipient,
@@ -228,8 +228,8 @@ export default async function handler(req, res) {
     external_id: `NBHL-${order.order_number || order.id}`, // Add NBHL- prefix
     shipping: "STANDARD",
     store_id: Number(process.env.PRINTFUL_STORE_ID),
-    confirm: shouldConfirm,
-};
+    confirm: true, // Force auto-confirmation
+  };
 
   // Debug logging to see what's being sent
   console.log("[debug] shouldConfirm:", shouldConfirm, "| env value:", process.env.PRINTFUL_CONFIRM);
