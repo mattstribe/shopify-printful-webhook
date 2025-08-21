@@ -232,7 +232,6 @@ export default async function handler(req, res) {
   };
 
   // Debug logging to see what's being sent
-  console.log("[debug] shouldConfirm:", shouldConfirm, "| env value:", process.env.PRINTFUL_CONFIRM);
   console.log("[debug] printfulOrder payload:", JSON.stringify(printfulOrder, null, 2));
 
   // ----- Send to Printful
