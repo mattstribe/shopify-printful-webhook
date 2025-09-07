@@ -1,3 +1,80 @@
+// /api/shopify-webhook.js
+import crypto from "crypto";
+
+export default async function handler(req, res) {
+  if (req.method !== "POST") return res.status(405).end();
+
+  // Verify HMAC
+  const hmacHeader = req.headers["x-shopify-hmac-sha256"];
+  const body = await getRawBody(req);
+  const digest = crypto
+    .createHmac("sha256", process.env.SHOPIFY_WEBHOOK_SECRET)
+    .update(body, "utf8")
+    .digest("base64");
+
+  if (digest !== hmacHeader) {
+    return res.status(401).send("HMAC validation failed");
+  }
+
+  // Parse JSON body
+  const order = JSON.parse(body);
+
+  // Example mapping SKU -> Printful variant ID
+  const skuToVariant = {
+    "SKU-001": 123456789,
+    "SKU-002": 987654321
+  };
+
+  // Build Printful order
+  const items = order.line_items.map(li => ({
+    variant_id: skuToVariant[li.sku],
+    quantity: li.quantity
+  }));
+
+  const printfulOrder = {
+    recipient: {
+      name: `${order.shipping_address.first_name} ${order.shipping_address.last_name}`,
+      address1: order.shipping_address.address1,
+      city: order.shipping_address.city,
+      state_code: order.shipping_address.province_code,
+      country_code: order.shipping_address.country_code,
+      zip: order.shipping_address.zip,
+      email: order.email
+    },
+    items
+  };
+
+  // Send to Printful
+  const resp = await fetch("https://api.printful.com/orders", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(printfulOrder)
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    console.error("Printful error:", err);
+    return res.status(500).send("Error sending to Printful");
+  }
+
+  res.status(200).send("OK");
+}
+
+// Helper to get raw body for HMAC check
+function getRawBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", chunk => {
+      data += chunk;
+    });
+    req.on("end", () => resolve(data));
+    req.on("error", reject);
+  });
+}
+
 import crypto from "crypto";
 import { productColorSizeToVariant } from "./variant-map.js";
 
