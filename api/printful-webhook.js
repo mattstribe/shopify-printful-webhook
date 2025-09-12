@@ -1,6 +1,18 @@
 // /api/printful-webhook.js
 import crypto from "crypto";
 
+async function findShopifyOrderIdByName(name) {
+  // Shopify Admin supports filtering by the order "name"
+  const url = `https://${shopDomain()}/admin/api/2025-01/orders.json?status=any&name=${encodeURIComponent(name)}`;
+  const r = await fetch(url, {
+    headers: { "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN }
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(`Order lookup by name failed: ${r.status} ${JSON.stringify(data)}`);
+  const order = (data?.orders || [])[0];
+  return order?.id || null;
+}
+
 // --- utils
 function getRawBody(req) {
   return new Promise((resolve, reject) => {
@@ -70,8 +82,31 @@ export default async function handler(req, res) {
   // Printful sends various shapes; we pull what we need robustly
   const event = body?.event || body?.type || "unknown";
   const ext = body?.data?.order?.external_id || body?.order?.external_id || body?.external_id || "";
-  const m = String(ext).match(/^shopify-(\d+)$/);
-  const shopifyOrderId = m ? m[1] : null;
+  
+  let shopifyOrderId = null;
+
+// First: try old pattern "shopify-<id>"
+{
+  const m = String(ext).match(/^shopify-(\d+)$/i);
+  if (m) shopifyOrderId = m[1];
+}
+
+// If still unknown, try your NBHL name style ("NBHL1234")
+if (!shopifyOrderId) {
+  // ext is something like "NBHL1234"
+  const byName = await findShopifyOrderIdByName(ext);
+  if (byName) {
+    shopifyOrderId = byName;
+  } else {
+    // Optional fallback: try "#1234" if ext is NBHL1234
+    const m2 = String(ext).match(/^NBHL(\d+)$/i);
+    if (m2) {
+      const altName = `#${m2[1]}`;
+      shopifyOrderId = await findShopifyOrderIdByName(altName);
+    }
+  }
+}
+
 
   console.log("[printful-webhook]", { event, shopifyOrderId, ext });
 
