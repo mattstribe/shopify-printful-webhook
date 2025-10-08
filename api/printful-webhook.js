@@ -41,7 +41,6 @@ async function getShopifyOrder(orderId) {
   return order;
 }
 
-// Creates a fulfillment & updates shipping info
 async function createShopifyFulfillment({ orderId, tracking, lineItemIds }) {
   const url = `https://${shopDomain()}/admin/api/2025-01/orders/${orderId}/fulfillments.json`;
   const payload = {
@@ -67,10 +66,10 @@ async function createShopifyFulfillment({ orderId, tracking, lineItemIds }) {
   return JSON.parse(text);
 }
 
-// NEW: mark order as fulfilled if Printful says so
-async function markOrderFulfilled(orderId) {
+// --- Mark order status helpers
+async function markOrderStatus(orderId, status) {
   const url = `https://${shopDomain()}/admin/api/2025-01/orders/${orderId}.json`;
-  const payload = { order: { id: orderId, fulfillment_status: "fulfilled" } };
+  const payload = { order: { id: orderId, fulfillment_status: status } };
   const r = await fetch(url, {
     method: "PUT",
     headers: {
@@ -80,9 +79,10 @@ async function markOrderFulfilled(orderId) {
     body: JSON.stringify(payload),
   });
   const text = await r.text();
-  if (!r.ok) console.error("Shopify mark fulfilled failed:", text);
+  if (!r.ok) console.error(`Shopify mark ${status} failed:`, text);
 }
 
+// --- handler
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
@@ -99,14 +99,8 @@ export default async function handler(req, res) {
   const ext = body?.data?.order?.external_id || body?.order?.external_id || body?.external_id || "";
 
   let shopifyOrderId = null;
-
-  // old pattern "shopify-<id>"
-  {
-    const m = String(ext).match(/^shopify-(\d+)$/i);
-    if (m) shopifyOrderId = m[1];
-  }
-
-  // fallback to NBHL-style
+  const m = String(ext).match(/^shopify-(\d+)$/i);
+  if (m) shopifyOrderId = m[1];
   if (!shopifyOrderId) {
     const byName = await findShopifyOrderIdByName(ext);
     if (byName) shopifyOrderId = byName;
@@ -121,7 +115,8 @@ export default async function handler(req, res) {
 
   console.log("[printful-webhook]", { event, shopifyOrderId, ext });
 
-  if (!/package_shipped|order_updated|order_fulfilled/i.test(event)) {
+  // Only handle fulfillment-related events
+  if (!/package_shipped|order_updated|order_fulfilled|order_in_process|order_packaged/i.test(event)) {
     return res.status(200).json({ ok: true, ignored: event });
   }
   if (!shopifyOrderId) {
@@ -129,11 +124,9 @@ export default async function handler(req, res) {
   }
 
   const shipments = body?.data?.shipments || body?.shipments || [];
-  if (!Array.isArray(shipments) || shipments.length === 0) {
-    console.log("[printful-webhook] no shipments");
-    return res.status(200).json({ ok: true, noShipments: true });
-  }
+  const hasShipments = Array.isArray(shipments) && shipments.length > 0;
 
+  // Get order
   let order;
   try { order = await getShopifyOrder(shopifyOrderId); }
   catch (e) {
@@ -145,36 +138,46 @@ export default async function handler(req, res) {
     .filter(li => (li.fulfillable_quantity ?? 0) > 0)
     .map(li => li.id);
 
-  if (fulfillable.length === 0) {
-    console.log("[printful-webhook] nothing fulfillable");
-    return res.status(200).json({ ok: true, alreadyFulfilled: true });
+  // --- Handle intermediate stages
+  if (/order_in_process|order_packaged/i.test(event)) {
+    await markOrderStatus(shopifyOrderId, "in_progress");
+    console.log("[printful-webhook] marked order in progress");
+    return res.status(200).json({ ok: true, status: "in_progress" });
   }
 
-  try {
-    const results = [];
-    for (const s of shipments) {
-      const tracking = {
-        number: s?.tracking_number || s?.tracking_numbers?.[0] || "",
-        url: s?.tracking_url || s?.tracking_urls?.[0] || "",
-        company: s?.carrier || s?.carrier_code || s?.service || "Carrier",
-      };
-      const resp = await createShopifyFulfillment({
-        orderId: shopifyOrderId,
-        tracking,
-        lineItemIds: fulfillable,
-      });
-      results.push(resp);
+  // --- Handle shipped/fulfilled
+  if (/package_shipped|order_fulfilled/i.test(event)) {
+    if (fulfillable.length === 0) {
+      console.log("[printful-webhook] nothing fulfillable");
+      await markOrderStatus(shopifyOrderId, "fulfilled");
+      return res.status(200).json({ ok: true, alreadyFulfilled: true });
     }
 
-    // NEW: if event indicates completion, mark order fulfilled
-    if (/order_fulfilled|package_shipped/i.test(event)) {
-      await markOrderFulfilled(shopifyOrderId);
+    try {
+      const results = [];
+      if (hasShipments) {
+        for (const s of shipments) {
+          const tracking = {
+            number: s?.tracking_number || s?.tracking_numbers?.[0] || "",
+            url: s?.tracking_url || s?.tracking_urls?.[0] || "",
+            company: s?.carrier || s?.carrier_code || s?.service || "Carrier",
+          };
+          const resp = await createShopifyFulfillment({
+            orderId: shopifyOrderId,
+            tracking,
+            lineItemIds: fulfillable,
+          });
+          results.push(resp);
+        }
+      }
+      await markOrderStatus(shopifyOrderId, "fulfilled");
+      console.log("[printful-webhook] fulfillment(s) created + order marked fulfilled");
+      return res.status(200).json({ ok: true, fulfillments: results });
+    } catch (e) {
+      console.error("[printful-webhook] fulfillment create failed:", e);
+      return res.status(200).json({ ok: false, reason: "fulfillment_failed" });
     }
-
-    console.log("[printful-webhook] fulfillment(s) created + order marked fulfilled");
-    return res.status(200).json({ ok: true, fulfillments: results });
-  } catch (e) {
-    console.error("[printful-webhook] fulfillment create failed:", e);
-    return res.status(200).json({ ok: false, reason: "fulfillment_failed" });
   }
+
+  return res.status(200).json({ ok: true, handled: event });
 }
