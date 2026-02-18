@@ -1,6 +1,23 @@
 // /api/debug.js
 import crypto from "crypto";
-import { skuToVariant } from "./sku-map.js";
+import { productColorSizeToVariant } from "./variant-map.js";
+
+function parseStructuredSku(rawSku = "") {
+  const sku = String(rawSku).trim();
+  const parts = sku.split("_");
+  if (parts.length < 4) return null;
+  const templateStr = parts[0];
+  const productCode = parts[1];
+  const size = parts[parts.length - 1];
+  const color = parts.slice(2, -1).join("_");
+  const templateId = Number(templateStr);
+  if (!Number.isFinite(templateId) || templateId <= 0) return null;
+  const normalize = (s) => String(s).toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return {
+    templateId,
+    variantKey: [productCode, color, size].map(normalize).join("_"),
+  };
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
@@ -43,9 +60,16 @@ export default async function handler(req, res) {
   // ---- Map items
   const missing = [];
   const mappedItems = (order.line_items || []).map((li) => {
-    const vId = li?.sku ? skuToVariant[li.sku] : undefined;
+    const parsed = parseStructuredSku(li?.sku);
+    const vId = parsed ? productColorSizeToVariant[parsed.variantKey] : undefined;
     if (!vId) missing.push(li?.sku || `(no sku: ${li?.title})`);
-    return vId ? { variant_id: vId, quantity: li.quantity ?? 1, _sku: li.sku } : null;
+    return vId ? {
+      variant_id: vId,
+      quantity: li.quantity ?? 1,
+      _sku: li.sku,
+      _variant_key: parsed?.variantKey,
+      _template_id: parsed?.templateId
+    } : null;
   }).filter(Boolean);
 
   const printfulOrder = {

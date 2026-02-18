@@ -11,11 +11,15 @@ function shopDomain() {
 function parseStructuredSku(rawSku = "") {
   const sku = String(rawSku).trim();
   const parts = sku.split("_");
-  if (parts.length !== 4) return null;
-  const [templateStr, productCode, color, size] = parts;
+  if (parts.length < 4) return null;
+  const templateStr = parts[0];
+  const productCode = parts[1];
+  const size = parts[parts.length - 1];
+  const color = parts.slice(2, -1).join("_");
   const templateId = Number(templateStr);
   if (!Number.isFinite(templateId) || templateId <= 0) return null;
-  const variantKey = [productCode, color, size].map(s => String(s).toUpperCase()).join("_");
+  const normalize = (s) => String(s).toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const variantKey = [productCode, color, size].map(normalize).join("_");
   return { templateId, variantKey };
 }
 
@@ -55,21 +59,59 @@ async function uploadFileToPrintful(fileUrl) {
   return data?.result?.id;
 }
 
+function safeJsonParse(text) {
+  try { return JSON.parse(text); }
+  catch { return { raw: text }; }
+}
+
+function truncate(value, maxLen = 1200) {
+  const str = typeof value === "string" ? value : JSON.stringify(value);
+  if (str.length <= maxLen) return str;
+  return `${str.slice(0, maxLen)}...[truncated]`;
+}
+
 // ---- Main handler
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   const raw = await getRawBody(req);
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const debugToken = url.searchParams.get("token");
+  const debugBypass = Boolean(debugToken && debugToken === process.env.DEBUG_TOKEN);
+  const includeTraceInResponse = debugBypass || url.searchParams.get("trace") === "1";
   const hmacHeader = req.headers["x-shopify-hmac-sha256"];
-  if (!hmacHeader) return res.status(401).send("Missing HMAC");
 
-  const digest = crypto.createHmac("sha256", process.env.SHOPIFY_WEBHOOK_SECRET)
-    .update(raw, "utf8")
-    .digest("base64");
-  if (digest !== hmacHeader) return res.status(401).send("HMAC validation failed");
+  if (!debugBypass) {
+    if (!hmacHeader) return res.status(401).send("Missing HMAC");
+    const digest = crypto.createHmac("sha256", process.env.SHOPIFY_WEBHOOK_SECRET)
+      .update(raw, "utf8")
+      .digest("base64");
+    if (digest !== hmacHeader) return res.status(401).send("HMAC validation failed");
+  }
 
   let order;
   try { order = JSON.parse(raw); } catch { return res.status(400).send("Invalid JSON"); }
+  const trace = {
+    received_at: new Date().toISOString(),
+    debug_bypass: debugBypass,
+    incoming: {
+      shopify_topic: req.headers["x-shopify-topic"] || null,
+      shopify_shop_domain: req.headers["x-shopify-shop-domain"] || null,
+      shopify_order_id: order.id || null,
+      order_number: order.order_number || null,
+      line_item_count: (order.line_items || []).length,
+      raw_preview: truncate(raw, 1800),
+    },
+    line_items: [],
+    requests: [],
+    missing: [],
+    result: null,
+  };
+  console.log("[shopify-webhook] received order", {
+    orderId: order.id,
+    orderNumber: order.order_number,
+    lineItemCount: (order.line_items || []).length,
+  });
 
   const sa = order.shipping_address || order.customer?.default_address || {};
   const recipient = {
@@ -86,32 +128,132 @@ export default async function handler(req, res) {
   const items = [];
   const missing = [];
 
+  const trackRequest = (entry) => {
+    trace.requests.push(entry);
+    console.log("[shopify-webhook][trace]", JSON.stringify(entry));
+  };
+
+  async function uploadFileToPrintfulTracked(fileUrl, context = {}) {
+    const storeId = process.env.PRINTFUL_STORE_ID;
+    const body = { url: fileUrl, store_id: Number(storeId) };
+    const res = await fetch("https://api.printful.com/files", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
+        "Content-Type": "application/json",
+        "X-PF-Store-Id": storeId,
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    const parsed = safeJsonParse(text);
+    trackRequest({
+      type: "printful_file_upload",
+      context,
+      request: body,
+      response_status: res.status,
+      response_ok: res.ok,
+      response_preview: truncate(parsed),
+    });
+    if (!res.ok) throw new Error(`Printful file upload failed: ${truncate(parsed)}`);
+    return parsed?.result?.id;
+  }
+
   for (const li of (order.line_items || [])) {
+    console.log("[shopify-webhook] processing line item", {
+      lineItemId: li?.id,
+      sku: li?.sku,
+      productId: li?.product_id,
+      quantity: li?.quantity,
+    });
     const parsed = parseStructuredSku(li?.sku);
-    if (!parsed) { missing.push(li?.sku || li.title); continue; }
+    if (!parsed) {
+      console.log("[shopify-webhook] invalid structured sku", li?.sku);
+      missing.push(li?.sku || li.title);
+      trace.line_items.push({
+        sku: li?.sku || null,
+        line_item_id: li?.id || null,
+        product_id: li?.product_id || null,
+        quantity: li?.quantity ?? 1,
+        parse_ok: false,
+      });
+      continue;
+    }
 
     const { templateId, variantKey } = parsed;
     const vId = productColorSizeToVariant[variantKey];
-    if (!vId) { missing.push(li?.sku || li.title); continue; }
+    if (!vId) {
+      console.log("[shopify-webhook] variant map miss", { sku: li?.sku, variantKey });
+      missing.push(li?.sku || li.title);
+      trace.line_items.push({
+        sku: li?.sku || null,
+        line_item_id: li?.id || null,
+        product_id: li?.product_id || null,
+        quantity: li?.quantity ?? 1,
+        parse_ok: true,
+        variant_key: variantKey,
+        variant_id_found: false,
+      });
+      continue;
+    }
 
     let handle;
-    try { handle = await getHandleByProductId(li.product_id); } catch (e) {
+    try {
+      handle = await getHandleByProductId(li.product_id);
+      trackRequest({
+        type: "shopify_product_lookup",
+        line_item_id: li?.id || null,
+        product_id: li?.product_id || null,
+        handle,
+      });
+    } catch (e) {
       console.error("handle lookup failed", li.product_id, e);
-      return res.status(200).json({ ok:false, reason:"handle_lookup_failed" });
+      missing.push(li?.sku || li.title);
+      trace.line_items.push({
+        sku: li?.sku || null,
+        line_item_id: li?.id || null,
+        product_id: li?.product_id || null,
+        quantity: li?.quantity ?? 1,
+        parse_ok: true,
+        variant_key: variantKey,
+        variant_id_found: true,
+        variant_id: vId,
+        product_handle_lookup_ok: false,
+        error: String(e?.message || e),
+      });
+      continue;
     }
 
     try {
       // ---- Upload files first
-      const mainFileId = await uploadFileToPrintful(artUrlFromHandle(handle));
+      const mainArtUrl = artUrlFromHandle(handle);
+      const mainFileId = await uploadFileToPrintfulTracked(mainArtUrl, {
+        sku: li?.sku || null,
+        line_item_id: li?.id || null,
+        placement: "default",
+      });
 
       const placementFiles = [];
       const placements = ["front", "back", "sleeve_left", "sleeve_right"];
       for (const placement of placements) {
         const placementUrl = placementArtUrl(templateId, placement);
         const headRes = await fetch(placementUrl, { method: "HEAD" });
+        trackRequest({
+          type: "placement_head_check",
+          line_item_id: li?.id || null,
+          sku: li?.sku || null,
+          placement,
+          url: placementUrl,
+          response_status: headRes.status,
+          response_ok: headRes.ok,
+        });
         if (headRes.ok) {
           try { 
-            const fileId = await uploadFileToPrintful(placementUrl);
+            const fileId = await uploadFileToPrintfulTracked(placementUrl, {
+              sku: li?.sku || null,
+              line_item_id: li?.id || null,
+              placement,
+            });
             placementFiles.push({ type: placement, id: fileId });
           } catch (e) {
             console.log("Placement upload failed:", placement, e.message);
@@ -126,15 +268,57 @@ export default async function handler(req, res) {
         template_id: templateId,
         files: allFiles
       });
+      trace.line_items.push({
+        sku: li?.sku || null,
+        line_item_id: li?.id || null,
+        product_id: li?.product_id || null,
+        quantity: li?.quantity ?? 1,
+        parse_ok: true,
+        variant_key: variantKey,
+        variant_id_found: true,
+        variant_id: vId,
+        product_handle_lookup_ok: true,
+        product_handle: handle,
+        file_count: allFiles.length,
+      });
+      console.log("[shopify-webhook] mapped line item", {
+        sku: li?.sku,
+        variantId: vId,
+        templateId,
+        fileCount: allFiles.length,
+      });
 
     } catch (e) {
       console.error("File upload failed for SKU", li?.sku, e.message);
       missing.push(li?.sku || li.title);
+      trace.line_items.push({
+        sku: li?.sku || null,
+        line_item_id: li?.id || null,
+        product_id: li?.product_id || null,
+        quantity: li?.quantity ?? 1,
+        parse_ok: true,
+        variant_key: variantKey,
+        variant_id_found: true,
+        variant_id: vId,
+        product_handle_lookup_ok: true,
+        product_handle: handle,
+        upload_ok: false,
+        error: String(e?.message || e),
+      });
       continue;
     }
   }
+  trace.missing = missing;
 
-  if (items.length === 0) return res.status(200).json({ ok:false, reason:"No valid items", missing });
+  if (items.length === 0) {
+    console.error("[shopify-webhook] no valid items", { missing, orderId: order.id });
+    trace.result = { ok: false, reason: "No valid items" };
+    console.log("[shopify-webhook][trace:summary]", JSON.stringify(trace));
+    return res.status(200).json(includeTraceInResponse
+      ? { ok:false, reason:"No valid items", missing, trace }
+      : { ok:false, reason:"No valid items", missing }
+    );
+  }
 
   const draftOrder = {
     recipient,
@@ -147,6 +331,10 @@ export default async function handler(req, res) {
 
   try {
     // ---- Step 1: Create draft
+    trackRequest({
+      type: "printful_order_create_request",
+      request: draftOrder,
+    });
     const r = await fetch("https://api.printful.com/orders", {
       method: "POST",
       headers: {
@@ -156,7 +344,15 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify(draftOrder),
     });
-    const draftPayload = await r.json();
+    const draftText = await r.text();
+    const draftPayload = safeJsonParse(draftText);
+    trackRequest({
+      type: "printful_order_create_response",
+      response_status: r.status,
+      response_ok: r.ok,
+      response_preview: truncate(draftPayload),
+    });
+    if (!r.ok) throw new Error(`Draft order create failed (${r.status}): ${JSON.stringify(draftPayload)}`);
     const orderId = draftPayload?.result?.id;
 
     if (!orderId) throw new Error("Draft order creation failed");
@@ -169,14 +365,34 @@ export default async function handler(req, res) {
         "X-PF-Store-Id": process.env.PRINTFUL_STORE_ID,
       },
     });
-    const confirmPayload = await confirmRes.json();
+    const confirmText = await confirmRes.text();
+    const confirmPayload = safeJsonParse(confirmText);
+    trackRequest({
+      type: "printful_order_confirm_response",
+      printful_order_id: orderId,
+      response_status: confirmRes.status,
+      response_ok: confirmRes.ok,
+      response_preview: truncate(confirmPayload),
+    });
+    if (!confirmRes.ok) {
+      throw new Error(`Draft confirm failed (${confirmRes.status}): ${JSON.stringify(confirmPayload)}`);
+    }
     console.log("[printful] Order confirmed:", confirmPayload?.result?.id);
-
-    return res.status(200).json({ ok: true, draft: draftPayload, confirmed: confirmPayload, missing });
+    trace.result = { ok: true, printful_order_id: confirmPayload?.result?.id || orderId };
+    console.log("[shopify-webhook][trace:summary]", JSON.stringify(trace));
+    return res.status(200).json(includeTraceInResponse
+      ? { ok: true, draft: draftPayload, confirmed: confirmPayload, missing, trace }
+      : { ok: true, draft: draftPayload, confirmed: confirmPayload, missing }
+    );
 
   } catch (err) {
     console.error("[printful] Order creation/confirmation failed:", err);
-    return res.status(200).json({ ok: false, error: String(err), missing });
+    trace.result = { ok: false, error: String(err) };
+    console.log("[shopify-webhook][trace:summary]", JSON.stringify(trace));
+    return res.status(200).json(includeTraceInResponse
+      ? { ok: false, error: String(err), missing, trace }
+      : { ok: false, error: String(err), missing }
+    );
   }
 }
 
