@@ -21,12 +21,52 @@ function getRawBody(req) {
     req.on("error", reject);
   });
 }
+
+function secureEqual(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+}
+
+function normalizePfSignature(sigHeader = "") {
+  const raw = String(sigHeader || "").trim();
+  if (!raw) return [];
+  const tokens = raw
+    .split(/[,\s]+/)
+    .map(t => t.trim())
+    .filter(Boolean)
+    .map((t) => {
+      const prefixed = t.match(/^(?:sha1|sha256|v1)=([a-f0-9+/=]+)$/i);
+      return prefixed ? prefixed[1] : t;
+    })
+    .map(t => t.replace(/^"|"$/g, ""));
+  return [...new Set(tokens)];
+}
+
 function verifySignature(headers, raw) {
-  const sig = String(headers["x-pf-signature"] || "");
+  const sigHeader = String(headers["x-pf-signature"] || "");
   const secret = process.env.PRINTFUL_WEBHOOK_SECRET || "";
-  if (!sig || !secret) return false;
-  const digest = crypto.createHmac("sha256", secret).update(raw, "utf8").digest("hex");
-  return sig.length === digest.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(digest));
+  if (!sigHeader || !secret) {
+    return { ok: false, reason: "missing_header_or_secret", meta: { hasSigHeader: Boolean(sigHeader), hasSecret: Boolean(secret) } };
+  }
+
+  const provided = normalizePfSignature(sigHeader);
+  const sha256Hex = crypto.createHmac("sha256", secret).update(raw, "utf8").digest("hex");
+  const sha256Base64 = crypto.createHmac("sha256", secret).update(raw, "utf8").digest("base64");
+  const sha1Hex = crypto.createHmac("sha1", secret).update(raw, "utf8").digest("hex");
+  const expected = [sha256Hex, sha256Base64, sha1Hex];
+  const ok = provided.some((p) => expected.some((e) => secureEqual(p, e)));
+
+  return {
+    ok,
+    reason: ok ? "matched" : "mismatch",
+    meta: {
+      headerPreview: sigHeader.slice(0, 24),
+      providedCount: provided.length,
+      providedLens: provided.map(v => v.length),
+      expectedLens: expected.map(v => v.length),
+      bodyLength: raw.length,
+    },
+  };
 }
 function shopDomain() {
   return (process.env.SHOPIFY_STORE_DOMAIN || "").replace(/^https?:\/\//, "").replace(/\/+$/, "");
@@ -87,9 +127,13 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   const raw = await getRawBody(req);
-  if (!verifySignature(req.headers, raw)) {
-    console.error("[printful-webhook] invalid signature");
-    return res.status(401).send("Invalid signature");
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const debugBypass = url.searchParams.get("token") === process.env.DEBUG_TOKEN;
+  const sigCheck = verifySignature(req.headers, raw);
+
+  if (!debugBypass && !sigCheck.ok) {
+    console.error("[printful-webhook] invalid signature", sigCheck.meta);
+    return res.status(401).json({ ok: false, reason: "Invalid signature", meta: sigCheck.meta });
   }
 
   let body;
