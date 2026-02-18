@@ -6,15 +6,14 @@ function parseStructuredSku(rawSku = "") {
   const sku = String(rawSku).trim();
   const parts = sku.split("_");
   if (parts.length < 4) return null;
-  const templateStr = parts[0];
+  const templateRef = String(parts[0] || "").trim();
   const productCode = parts[1];
   const size = parts[parts.length - 1];
   const color = parts.slice(2, -1).join("_");
-  const templateId = Number(templateStr);
-  if (!Number.isFinite(templateId) || templateId <= 0) return null;
+  if (!templateRef) return null;
   const normalize = (s) => String(s).toUpperCase().replace(/[^A-Z0-9]/g, "");
   return {
-    templateId,
+    templateRef,
     variantKey: [productCode, color, size].map(normalize).join("_"),
   };
 }
@@ -68,7 +67,7 @@ export default async function handler(req, res) {
       quantity: li.quantity ?? 1,
       _sku: li.sku,
       _variant_key: parsed?.variantKey,
-      _template_id: parsed?.templateId
+      _template_ref: parsed?.templateRef
     } : null;
   }).filter(Boolean);
 

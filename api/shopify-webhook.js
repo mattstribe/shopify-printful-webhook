@@ -12,15 +12,14 @@ function parseStructuredSku(rawSku = "") {
   const sku = String(rawSku).trim();
   const parts = sku.split("_");
   if (parts.length < 4) return null;
-  const templateStr = parts[0];
+  const templateRef = String(parts[0] || "").trim();
   const productCode = parts[1];
   const size = parts[parts.length - 1];
   const color = parts.slice(2, -1).join("_");
-  const templateId = Number(templateStr);
-  if (!Number.isFinite(templateId) || templateId <= 0) return null;
+  if (!templateRef) return null;
   const normalize = (s) => String(s).toUpperCase().replace(/[^A-Z0-9]/g, "");
   const variantKey = [productCode, color, size].map(normalize).join("_");
-  return { templateId, variantKey };
+  return { templateRef, variantKey };
 }
 
 async function getHandleByProductId(id) {
@@ -38,9 +37,9 @@ function artUrlFromHandle(handle) {
   return `${base}/${handle}.png`;
 }
 
-function placementArtUrl(templateId, placement) {
+function placementArtUrl(templateRef, placement) {
   const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
-  return `${base}/${templateId}_${placement}.png`;
+  return `${base}/${templateRef}_${placement}.png`;
 }
 
 async function uploadFileToPrintful(fileUrl) {
@@ -180,7 +179,7 @@ export default async function handler(req, res) {
       continue;
     }
 
-    const { templateId, variantKey } = parsed;
+    const { templateRef, variantKey } = parsed;
     const vId = productColorSizeToVariant[variantKey];
     if (!vId) {
       console.log("[shopify-webhook] variant map miss", { sku: li?.sku, variantKey });
@@ -236,7 +235,7 @@ export default async function handler(req, res) {
       const placementFiles = [];
       const placements = ["front", "back", "sleeve_left", "sleeve_right"];
       for (const placement of placements) {
-        const placementUrl = placementArtUrl(templateId, placement);
+        const placementUrl = placementArtUrl(templateRef, placement);
         const headRes = await fetch(placementUrl, { method: "HEAD" });
         trackRequest({
           type: "placement_head_check",
@@ -265,7 +264,6 @@ export default async function handler(req, res) {
       items.push({
         variant_id: vId,
         quantity: li.quantity ?? 1,
-        template_id: templateId,
         files: allFiles
       });
       trace.line_items.push({
@@ -277,6 +275,7 @@ export default async function handler(req, res) {
         variant_key: variantKey,
         variant_id_found: true,
         variant_id: vId,
+        template_ref: templateRef,
         product_handle_lookup_ok: true,
         product_handle: handle,
         file_count: allFiles.length,
@@ -284,7 +283,7 @@ export default async function handler(req, res) {
       console.log("[shopify-webhook] mapped line item", {
         sku: li?.sku,
         variantId: vId,
-        templateId,
+        templateRef,
         fileCount: allFiles.length,
       });
 
@@ -300,6 +299,7 @@ export default async function handler(req, res) {
         variant_key: variantKey,
         variant_id_found: true,
         variant_id: vId,
+        template_ref: templateRef,
         product_handle_lookup_ok: true,
         product_handle: handle,
         upload_ok: false,
