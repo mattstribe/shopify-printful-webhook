@@ -178,11 +178,15 @@ export default async function handler(req, res) {
   const raw = await getRawBody(req);
   const url = new URL(req.url, `http://${req.headers.host}`);
   const debugBypass = url.searchParams.get("token") === process.env.DEBUG_TOKEN;
+  const allowUnsigned = String(process.env.ALLOW_UNSIGNED_PRINTFUL_WEBHOOKS || "").toLowerCase() === "true";
   const sigCheck = verifySignature(req.headers, raw);
 
-  if (!debugBypass && !sigCheck.ok) {
+  if (!debugBypass && !allowUnsigned && !sigCheck.ok) {
     console.error("[printful-webhook] invalid signature", sigCheck.meta);
     return res.status(401).json({ ok: false, reason: "Invalid signature", meta: sigCheck.meta });
+  }
+  if (allowUnsigned && !sigCheck.ok) {
+    console.warn("[printful-webhook] signature bypassed by ALLOW_UNSIGNED_PRINTFUL_WEBHOOKS");
   }
 
   let body;
