@@ -72,6 +72,47 @@ function shopDomain() {
   return (process.env.SHOPIFY_STORE_DOMAIN || "").replace(/^https?:\/\//, "").replace(/\/+$/, "");
 }
 
+function extractShipments(body) {
+  const sources = [
+    body?.data?.shipments,
+    body?.shipments,
+    body?.data?.shipment ? [body.data.shipment] : null,
+    body?.shipment ? [body.shipment] : null,
+    body?.data?.order?.shipments,
+    body?.order?.shipments,
+  ];
+  for (const src of sources) {
+    if (Array.isArray(src) && src.length > 0) return src;
+  }
+  return [];
+}
+
+function normalizeTracking(shipment = {}, body = {}) {
+  const number =
+    shipment?.tracking_number ||
+    shipment?.tracking_numbers?.[0] ||
+    shipment?.trackingCode ||
+    body?.data?.tracking_number ||
+    body?.tracking_number ||
+    "";
+  const url =
+    shipment?.tracking_url ||
+    shipment?.tracking_urls?.[0] ||
+    shipment?.trackingUrl ||
+    body?.data?.tracking_url ||
+    body?.tracking_url ||
+    "";
+  const company =
+    shipment?.carrier ||
+    shipment?.carrier_code ||
+    shipment?.service ||
+    shipment?.tracking_company ||
+    body?.data?.carrier ||
+    body?.carrier ||
+    "Carrier";
+  return { number: String(number || ""), url: String(url || ""), company: String(company || "Carrier") };
+}
+
 // --- Shopify helpers
 async function getShopifyOrder(orderId) {
   const url = `https://${shopDomain()}/admin/api/2025-01/orders/${orderId}.json`;
@@ -83,12 +124,20 @@ async function getShopifyOrder(orderId) {
 
 async function createShopifyFulfillment({ orderId, tracking, lineItemIds }) {
   const url = `https://${shopDomain()}/admin/api/2025-01/orders/${orderId}/fulfillments.json`;
+  const trackingInfo = {
+    company: tracking?.company || "Carrier",
+    number: tracking?.number || "",
+    url: tracking?.url || "",
+  };
   const payload = {
     fulfillment: {
       location_id: Number(process.env.SHOPIFY_LOCATION_ID),
-      tracking_company: tracking?.company || tracking?.carrier || "Carrier",
-      tracking_number: tracking?.number || "",
-      tracking_urls: tracking?.url ? [tracking.url] : undefined,
+      tracking_company: trackingInfo.company,
+      tracking_number: trackingInfo.number,
+      tracking_numbers: trackingInfo.number ? [trackingInfo.number] : undefined,
+      tracking_url: trackingInfo.url || undefined,
+      tracking_urls: trackingInfo.url ? [trackingInfo.url] : undefined,
+      tracking_info: trackingInfo,
       notify_customer: true,
       line_items: lineItemIds.map(id => ({ id })),
     },
@@ -167,7 +216,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, ignored: "no_external_id" });
   }
 
-  const shipments = body?.data?.shipments || body?.shipments || [];
+  const shipments = extractShipments(body);
   const hasShipments = Array.isArray(shipments) && shipments.length > 0;
 
   // Get order
@@ -197,15 +246,29 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, alreadyFulfilled: true });
     }
 
+    if (!hasShipments) {
+      console.error("[printful-webhook] shipped event without shipment data", {
+        event,
+        ext,
+        payloadKeys: Object.keys(body || {}),
+        dataKeys: Object.keys(body?.data || {}),
+      });
+      return res.status(200).json({ ok: false, reason: "no_shipment_tracking_in_payload" });
+    }
+
     try {
       const results = [];
       if (hasShipments) {
         for (const s of shipments) {
-          const tracking = {
-            number: s?.tracking_number || s?.tracking_numbers?.[0] || "",
-            url: s?.tracking_url || s?.tracking_urls?.[0] || "",
-            company: s?.carrier || s?.carrier_code || s?.service || "Carrier",
-          };
+          const tracking = normalizeTracking(s, body);
+          console.log("[printful-webhook] shipment tracking parsed", {
+            event,
+            shopifyOrderId,
+            ext,
+            trackingNumber: tracking.number || null,
+            trackingUrl: tracking.url || null,
+            trackingCompany: tracking.company || null,
+          });
           const resp = await createShopifyFulfillment({
             orderId: shopifyOrderId,
             tracking,
