@@ -4,5 +4,8 @@
   "type": "module",
   "description": "A minimal serverless function for Shopify to Printful order forwarding on Vercel.",
   "main": "api/shopify-webhook.js",
+  "scripts": {
+    "printful:variants": "node scripts/printful-variant-map.js"
+  },
   "license": "MIT"
 }
