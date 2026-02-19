@@ -262,6 +262,10 @@ function truncate(value, maxLen = 1200) {
   return `${str.slice(0, maxLen)}...[truncated]`;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function isPrintfulExternalIdDuplicate(payload) {
   const code = String(payload?.error?.api_error_code || "");
   if (code === "OR-13") return true;
@@ -356,6 +360,50 @@ export default async function handler(req, res) {
     });
     if (!res.ok) throw new Error(`Printful file upload failed: ${truncate(parsed)}`);
     return parsed?.result?.id;
+  }
+
+  async function waitForPrintfulFileReady(fileId, context = {}) {
+    if (!fileId) return { ready: false, reason: "missing_file_id" };
+    const storeId = process.env.PRINTFUL_STORE_ID;
+    const maxAttempts = Number(process.env.PRINTFUL_FILE_READY_ATTEMPTS || 8);
+    const delayMs = Number(process.env.PRINTFUL_FILE_READY_DELAY_MS || 1500);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const res = await fetch(`https://api.printful.com/files/${fileId}`, {
+        headers: {
+          Authorization: `Bearer ${process.env.PRINTFUL_API_TOKEN}`,
+          "X-PF-Store-Id": storeId,
+        },
+      });
+      const text = await res.text();
+      const parsed = safeJsonParse(text);
+      const status = String(
+        parsed?.result?.status ||
+        parsed?.result?.preview_status ||
+        parsed?.result?.sync_status ||
+        ""
+      ).toLowerCase();
+      const isReady = status === "ok" || status === "accepted" || status === "ready";
+      const isFailed = status === "failed" || status === "error" || status === "rejected";
+      trackRequest({
+        type: "printful_file_status_check",
+        context,
+        file_id: fileId,
+        attempt,
+        max_attempts: maxAttempts,
+        response_status: res.status,
+        response_ok: res.ok,
+        file_status: status || null,
+        response_preview: truncate(parsed),
+      });
+
+      if (!res.ok) return { ready: false, reason: `status_check_http_${res.status}`, status };
+      if (isReady) return { ready: true, status };
+      if (isFailed) return { ready: false, reason: "file_status_failed", status };
+      if (attempt < maxAttempts) await sleep(delayMs);
+    }
+
+    return { ready: false, reason: "timeout_waiting_for_file_ready" };
   }
 
   for (const li of (order.line_items || [])) {
@@ -493,6 +541,21 @@ export default async function handler(req, res) {
         placement: "default",
         source: defaultArtUrl === mainArtUrl ? "base_art" : "composite_art",
       });
+      if (defaultArtUrl !== mainArtUrl) {
+        const fileReady = await waitForPrintfulFileReady(mainFileId, {
+          sku: li?.sku || null,
+          line_item_id: li?.id || null,
+          placement: "default",
+          source: "composite_art",
+        });
+        trackRequest({
+          type: "printful_file_ready_result",
+          line_item_id: li?.id || null,
+          sku: li?.sku || null,
+          file_id: mainFileId,
+          ...fileReady,
+        });
+      }
 
       const placementFiles = [];
       const placements = ["front", "back", "sleeve_left", "sleeve_right"];
