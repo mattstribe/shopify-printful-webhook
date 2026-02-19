@@ -426,12 +426,8 @@ export default async function handler(req, res) {
     try {
       // ---- Upload files first
       const mainArtUrl = artUrlFromHandle(handle);
-      const mainFileId = await uploadFileToPrintfulTracked(mainArtUrl, {
-        sku: li?.sku || null,
-        line_item_id: li?.id || null,
-        placement: "default",
-      });
       const customNumber = extractCustomNumberFromLineItem(li);
+      let defaultArtUrl = mainArtUrl;
       console.log("[shopify-webhook] line item custom properties", {
         lineItemId: li?.id || null,
         sku: li?.sku || null,
@@ -479,6 +475,7 @@ export default async function handler(req, res) {
             upload_method: uploadResult?.method || "api_proxy",
             upload_configured: hasR2UploadConfig() || Boolean(process.env.COMPOSITE_UPLOAD_API_URL),
           });
+          defaultArtUrl = uploadResult.url;
         } else {
           trackRequest({
             type: "composite_skipped_missing_number_file",
@@ -490,6 +487,12 @@ export default async function handler(req, res) {
           });
         }
       }
+      const mainFileId = await uploadFileToPrintfulTracked(defaultArtUrl, {
+        sku: li?.sku || null,
+        line_item_id: li?.id || null,
+        placement: "default",
+        source: defaultArtUrl === mainArtUrl ? "base_art" : "composite_art",
+      });
 
       const placementFiles = [];
       const placements = ["front", "back", "sleeve_left", "sleeve_right"];
@@ -538,6 +541,8 @@ export default async function handler(req, res) {
         custom_number: customNumber || null,
         product_handle_lookup_ok: true,
         product_handle: handle,
+        default_art_source: defaultArtUrl === mainArtUrl ? "base_art" : "composite_art",
+        default_art_url: defaultArtUrl,
         file_count: allFiles.length,
       });
       console.log("[shopify-webhook] mapped line item", {
