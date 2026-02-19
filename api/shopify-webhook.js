@@ -43,6 +43,10 @@ function placementArtUrl(templateRef, placement) {
   return `${base}/${templateRef}_${placement}.png`;
 }
 
+function compositePublicBaseUrl() {
+  return (process.env.COMPOSITE_PUBLIC_BASE_URL || process.env.ART_BASE_URL || "").replace(/\/+$/, "");
+}
+
 function numberArtUrl(templateRef, customNumber) {
   const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
   return `${base}/${templateRef}_${customNumber}.png`;
@@ -111,11 +115,12 @@ function compositeFileName({ handle, templateRef, customNumber }) {
   return `${h}__${t}__num-${n}.png`;
 }
 
-function deriveRemotePathFromArtBase(fileName) {
-  const base = process.env.ART_BASE_URL || "";
+function deriveRemotePathFromSourceUrl(sourceUrl, fileName) {
   try {
-    const u = new URL(base);
-    const prefix = u.pathname.replace(/^\/+|\/+$/g, "");
+    const u = new URL(sourceUrl);
+    const parts = u.pathname.split("/").filter(Boolean);
+    parts.pop(); // drop source filename
+    const prefix = parts.join("/");
     return prefix ? `${prefix}/${fileName}` : fileName;
   } catch {
     return fileName;
@@ -143,6 +148,9 @@ async function buildCompositePng({ baseUrl, overlayUrl }) {
 async function uploadCompositeViaApi({ fileName, remotePath, pngBuffer }) {
   const apiUrl = process.env.COMPOSITE_UPLOAD_API_URL || "";
   if (!apiUrl) return null;
+  const publicBase = compositePublicBaseUrl();
+  const normalizedRemotePath = String(remotePath || "").replace(/^\/+/, "");
+  const computedPublicUrl = publicBase ? `${publicBase}/${normalizedRemotePath}` : null;
   const r = await fetch(apiUrl, {
     method: "POST",
     headers: {
@@ -159,7 +167,8 @@ async function uploadCompositeViaApi({ fileName, remotePath, pngBuffer }) {
   return {
     upload_api_url: apiUrl,
     remote_path: remotePath,
-    url: typeof url === "string" && url ? url : null,
+    api_reported_url: typeof url === "string" && url ? url : null,
+    url: computedPublicUrl || (typeof url === "string" && url ? url : null),
   };
 }
 
@@ -188,6 +197,13 @@ function truncate(value, maxLen = 1200) {
   const str = typeof value === "string" ? value : JSON.stringify(value);
   if (str.length <= maxLen) return str;
   return `${str.slice(0, maxLen)}...[truncated]`;
+}
+
+function isPrintfulExternalIdDuplicate(payload) {
+  const code = String(payload?.error?.api_error_code || "");
+  if (code === "OR-13") return true;
+  const msg = String(payload?.error?.message || payload?.result || "").toLowerCase();
+  return msg.includes("external id already exists");
 }
 
 // ---- Main handler
@@ -373,7 +389,7 @@ export default async function handler(req, res) {
         });
         if (numberHead.ok) {
           const compositeName = compositeFileName({ handle, templateRef, customNumber });
-          const remotePath = deriveRemotePathFromArtBase(compositeName);
+          const remotePath = deriveRemotePathFromSourceUrl(mainArtUrl, compositeName);
           const compositeBuffer = await buildCompositePng({
             baseUrl: mainArtUrl,
             overlayUrl: customNumberUrl,
@@ -529,7 +545,26 @@ export default async function handler(req, res) {
       response_ok: r.ok,
       response_preview: truncate(draftPayload),
     });
-    if (!r.ok) throw new Error(`Draft order create failed (${r.status}): ${JSON.stringify(draftPayload)}`);
+    if (!r.ok) {
+      if (isPrintfulExternalIdDuplicate(draftPayload)) {
+        trace.result = {
+          ok: true,
+          status: "already_exists",
+          external_id: draftOrder.external_id,
+          printful_error_code: draftPayload?.error?.api_error_code || null,
+        };
+        console.log("[printful] duplicate external_id treated as success", {
+          externalId: draftOrder.external_id,
+          code: draftPayload?.error?.api_error_code || null,
+        });
+        console.log("[shopify-webhook][trace:summary]", JSON.stringify(trace));
+        return res.status(200).json(includeTraceInResponse
+          ? { ok: true, already_exists: true, external_id: draftOrder.external_id, missing, trace }
+          : { ok: true, already_exists: true, external_id: draftOrder.external_id, missing }
+        );
+      }
+      throw new Error(`Draft order create failed (${r.status}): ${JSON.stringify(draftPayload)}`);
+    }
     const orderId = draftPayload?.result?.id;
 
     if (!orderId) throw new Error("Draft order creation failed");
