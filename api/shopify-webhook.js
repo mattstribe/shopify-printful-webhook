@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import sharp from "sharp";
+import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { productColorSizeToVariant } from "./variant-map.js";
 
 // ---- Helpers
@@ -45,6 +46,10 @@ function placementArtUrl(templateRef, placement) {
 
 function compositePublicBaseUrl() {
   return (process.env.COMPOSITE_PUBLIC_BASE_URL || process.env.ART_BASE_URL || "").replace(/\/+$/, "");
+}
+
+function compositeUploadPluginId() {
+  return process.env.COMPOSITE_UPLOAD_PLUGIN_ID || "variant-merch";
 }
 
 function numberArtUrl(templateRef, customNumber) {
@@ -145,18 +150,69 @@ async function buildCompositePng({ baseUrl, overlayUrl }) {
     .toBuffer();
 }
 
+function r2Endpoint() {
+  if (process.env.R2_ENDPOINT) return process.env.R2_ENDPOINT;
+  const accountId = process.env.R2_ACCOUNT_ID || "";
+  if (!accountId) return "";
+  return `https://${accountId}.r2.cloudflarestorage.com`;
+}
+
+function hasR2UploadConfig() {
+  return Boolean(
+    process.env.R2_BUCKET_NAME &&
+    process.env.R2_ACCESS_KEY_ID &&
+    process.env.R2_SECRET_ACCESS_KEY &&
+    r2Endpoint()
+  );
+}
+
+async function uploadCompositeDirectToR2({ remotePath, pngBuffer }) {
+  const endpoint = r2Endpoint();
+  const bucket = process.env.R2_BUCKET_NAME || "";
+  const key = String(remotePath || "").replace(/^\/+/, "");
+  const client = new S3Client({
+    region: process.env.R2_REGION || "auto",
+    endpoint,
+    forcePathStyle: true,
+    credentials: {
+      accessKeyId: process.env.R2_ACCESS_KEY_ID || "",
+      secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",
+    },
+  });
+
+  await client.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: pngBuffer,
+    ContentType: "image/png",
+    CacheControl: "public, max-age=31536000, immutable",
+  }));
+
+  const publicBase = compositePublicBaseUrl();
+  const normalizedPath = key.replace(/^\/+/, "");
+  return {
+    method: "r2_direct",
+    endpoint,
+    bucket,
+    remote_path: normalizedPath,
+    url: publicBase ? `${publicBase}/${normalizedPath}` : null,
+  };
+}
+
 async function uploadCompositeViaApi({ fileName, remotePath, pngBuffer }) {
   const apiUrl = process.env.COMPOSITE_UPLOAD_API_URL || "";
   if (!apiUrl) return null;
   const publicBase = compositePublicBaseUrl();
   const normalizedRemotePath = String(remotePath || "").replace(/^\/+/, "");
+  const pluginId = compositeUploadPluginId();
   const computedPublicUrl = publicBase ? `${publicBase}/${normalizedRemotePath}` : null;
   const r = await fetch(apiUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/octet-stream",
-      "X-File-Path": remotePath,
+      "X-File-Path": normalizedRemotePath,
       "X-File-Name": fileName,
+      "X-Plugin-ID": pluginId,
     },
     body: pngBuffer,
   });
@@ -170,6 +226,13 @@ async function uploadCompositeViaApi({ fileName, remotePath, pngBuffer }) {
     api_reported_url: typeof url === "string" && url ? url : null,
     url: computedPublicUrl || (typeof url === "string" && url ? url : null),
   };
+}
+
+async function uploadCompositeToCdn({ fileName, remotePath, pngBuffer }) {
+  if (hasR2UploadConfig()) {
+    return uploadCompositeDirectToR2({ remotePath, pngBuffer });
+  }
+  return uploadCompositeViaApi({ fileName, remotePath, pngBuffer });
 }
 
 async function uploadFileToPrintful(fileUrl) {
@@ -394,11 +457,14 @@ export default async function handler(req, res) {
             baseUrl: mainArtUrl,
             overlayUrl: customNumberUrl,
           });
-          const uploadResult = await uploadCompositeViaApi({
+          const uploadResult = await uploadCompositeToCdn({
             fileName: compositeName,
             remotePath,
             pngBuffer: compositeBuffer,
           });
+          if (!uploadResult?.url) {
+            throw new Error("Composite upload succeeded but no public URL was resolved");
+          }
           trackRequest({
             type: "composite_created_uploaded",
             line_item_id: li?.id || null,
@@ -409,8 +475,9 @@ export default async function handler(req, res) {
             number_url: customNumberUrl,
             composite_file_name: compositeName,
             composite_remote_path: remotePath,
-            composite_public_url: uploadResult?.url || null,
-            upload_configured: Boolean(process.env.COMPOSITE_UPLOAD_API_URL),
+            composite_public_url: uploadResult.url,
+            upload_method: uploadResult?.method || "api_proxy",
+            upload_configured: hasR2UploadConfig() || Boolean(process.env.COMPOSITE_UPLOAD_API_URL),
           });
         } else {
           trackRequest({
