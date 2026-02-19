@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import sharp from "sharp";
 import { productColorSizeToVariant } from "./variant-map.js";
 
 // ---- Helpers
@@ -40,6 +41,126 @@ function artUrlFromHandle(handle) {
 function placementArtUrl(templateRef, placement) {
   const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
   return `${base}/${templateRef}_${placement}.png`;
+}
+
+function numberArtUrl(templateRef, customNumber) {
+  const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
+  return `${base}/${templateRef}_${customNumber}.png`;
+}
+
+function configuredNumberKeys() {
+  const raw = process.env.CUSTOM_NUMBER_FIELD_KEYS || "";
+  return raw
+    .split(",")
+    .map((k) => k.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function extractCustomNumberFromLineItem(li = {}) {
+  const configuredKeys = configuredNumberKeys();
+  const isNoneLikeValue = (v) => {
+    const s = String(v ?? "").trim().toLowerCase();
+    return s === "none" || s === "no" || s === "n/a" || s === "na";
+  };
+  const isNumberFieldName = (name) => /number|jersey|shirt|custom/i.test(name);
+  const props = [
+    ...(Array.isArray(li?.properties) ? li.properties : []),
+    ...(Array.isArray(li?.custom_properties) ? li.custom_properties : []),
+  ];
+
+  for (const p of props) {
+    const name = String(p?.name || p?.key || "").trim();
+    const value = String(p?.value ?? "").trim();
+    if (!name || !value) continue;
+    const nameLc = name.toLowerCase();
+    const isTargetField = configuredKeys.length > 0
+      ? configuredKeys.includes(nameLc)
+      : isNumberFieldName(name);
+    if (!isTargetField) continue;
+    if (isNoneLikeValue(value)) return null;
+    if (/^\d+$/.test(value)) return value;
+  }
+
+  if (configuredKeys.length > 0) return null;
+  for (const p of props) {
+    const value = String(p?.value ?? "").trim();
+    if (/^\d+$/.test(value)) return value;
+  }
+  return null;
+}
+
+function summarizeLineItemProperties(li = {}) {
+  const props = [
+    ...(Array.isArray(li?.properties) ? li.properties : []),
+    ...(Array.isArray(li?.custom_properties) ? li.custom_properties : []),
+  ];
+  return props.map((p) => ({
+    name: String(p?.name || p?.key || "").trim(),
+    value: String(p?.value ?? "").trim(),
+  }));
+}
+
+function sanitizeFilePart(value = "") {
+  return String(value).toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+}
+
+function compositeFileName({ handle, templateRef, customNumber }) {
+  const h = sanitizeFilePart(handle || "art");
+  const t = sanitizeFilePart(templateRef || "template");
+  const n = sanitizeFilePart(customNumber || "0");
+  return `${h}__${t}__num-${n}.png`;
+}
+
+function deriveRemotePathFromArtBase(fileName) {
+  const base = process.env.ART_BASE_URL || "";
+  try {
+    const u = new URL(base);
+    const prefix = u.pathname.replace(/^\/+|\/+$/g, "");
+    return prefix ? `${prefix}/${fileName}` : fileName;
+  } catch {
+    return fileName;
+  }
+}
+
+async function fetchImageBuffer(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Image fetch failed (${r.status}) for ${url}`);
+  const buf = await r.arrayBuffer();
+  return Buffer.from(buf);
+}
+
+async function buildCompositePng({ baseUrl, overlayUrl }) {
+  const [baseBuffer, overlayBuffer] = await Promise.all([
+    fetchImageBuffer(baseUrl),
+    fetchImageBuffer(overlayUrl),
+  ]);
+  return sharp(baseBuffer)
+    .composite([{ input: overlayBuffer, left: 0, top: 0 }])
+    .png()
+    .toBuffer();
+}
+
+async function uploadCompositeViaApi({ fileName, remotePath, pngBuffer }) {
+  const apiUrl = process.env.COMPOSITE_UPLOAD_API_URL || "";
+  if (!apiUrl) return null;
+  const r = await fetch(apiUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "X-File-Path": remotePath,
+      "X-File-Name": fileName,
+    },
+    body: pngBuffer,
+  });
+  const text = await r.text();
+  const parsed = safeJsonParse(text);
+  if (!r.ok) throw new Error(`Composite API upload failed (${r.status}): ${truncate(parsed)}`);
+  const url = parsed?.url;
+  return {
+    upload_api_url: apiUrl,
+    remote_path: remotePath,
+    url: typeof url === "string" && url ? url : null,
+  };
 }
 
 async function uploadFileToPrintful(fileUrl) {
@@ -231,6 +352,61 @@ export default async function handler(req, res) {
         line_item_id: li?.id || null,
         placement: "default",
       });
+      const customNumber = extractCustomNumberFromLineItem(li);
+      console.log("[shopify-webhook] line item custom properties", {
+        lineItemId: li?.id || null,
+        sku: li?.sku || null,
+        properties: summarizeLineItemProperties(li),
+        extractedCustomNumber: customNumber || null,
+      });
+      if (customNumber) {
+        const customNumberUrl = numberArtUrl(templateRef, customNumber);
+        const numberHead = await fetch(customNumberUrl, { method: "HEAD" });
+        trackRequest({
+          type: "custom_number_head_check",
+          line_item_id: li?.id || null,
+          sku: li?.sku || null,
+          custom_number: customNumber,
+          url: customNumberUrl,
+          response_status: numberHead.status,
+          response_ok: numberHead.ok,
+        });
+        if (numberHead.ok) {
+          const compositeName = compositeFileName({ handle, templateRef, customNumber });
+          const remotePath = deriveRemotePathFromArtBase(compositeName);
+          const compositeBuffer = await buildCompositePng({
+            baseUrl: mainArtUrl,
+            overlayUrl: customNumberUrl,
+          });
+          const uploadResult = await uploadCompositeViaApi({
+            fileName: compositeName,
+            remotePath,
+            pngBuffer: compositeBuffer,
+          });
+          trackRequest({
+            type: "composite_created_uploaded",
+            line_item_id: li?.id || null,
+            sku: li?.sku || null,
+            template_ref: templateRef,
+            custom_number: customNumber,
+            base_url: mainArtUrl,
+            number_url: customNumberUrl,
+            composite_file_name: compositeName,
+            composite_remote_path: remotePath,
+            composite_public_url: uploadResult?.url || null,
+            upload_configured: Boolean(process.env.COMPOSITE_UPLOAD_API_URL),
+          });
+        } else {
+          trackRequest({
+            type: "composite_skipped_missing_number_file",
+            line_item_id: li?.id || null,
+            sku: li?.sku || null,
+            template_ref: templateRef,
+            custom_number: customNumber,
+            number_url: customNumberUrl,
+          });
+        }
+      }
 
       const placementFiles = [];
       const placements = ["front", "back", "sleeve_left", "sleeve_right"];
@@ -276,6 +452,7 @@ export default async function handler(req, res) {
         variant_id_found: true,
         variant_id: vId,
         template_ref: templateRef,
+        custom_number: customNumber || null,
         product_handle_lookup_ok: true,
         product_handle: handle,
         file_count: allFiles.length,
