@@ -200,7 +200,7 @@ async function uploadCompositeDirectToR2({ remotePath, pngBuffer }) {
 }
 
 async function uploadCompositeViaApi({ fileName, remotePath, pngBuffer }) {
-  const apiUrl = process.env.COMPOSITE_UPLOAD_API_URL || "";
+  const apiUrl = process.env.COMPOSITE_UPLOAD_API_URL || "https://stribe-api.vercel.app/api/upload";
   if (!apiUrl) return null;
   const publicBase = compositePublicBaseUrl();
   const normalizedRemotePath = String(remotePath || "").replace(/^\/+/, "");
