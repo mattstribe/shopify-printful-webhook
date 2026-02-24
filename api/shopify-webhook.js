@@ -21,7 +21,7 @@ function parseStructuredSku(rawSku = "") {
   if (!templateRef) return null;
   const normalize = (s) => String(s).toUpperCase().replace(/[^A-Z0-9]/g, "");
   const variantKey = [productCode, color, size].map(normalize).join("_");
-  return { templateRef, variantKey };
+  return { templateRef, productCode, color, variantKey };
 }
 
 async function getHandleByProductId(id) {
@@ -39,9 +39,19 @@ function artUrlFromHandle(handle) {
   return `${base}/${handle}.png`;
 }
 
+// Prefixed path (e.g. 26-DivPrev/filename.png) to match variant-merch CDN layout
+function mainArtUrlWithPrefix(handle, templateRef, productCode, color) {
+  const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
+  const prefix = sanitizeFilePart(templateRef || "");
+  const filename = `${sanitizeFilePart(handle || "")}_${prefix}_${sanitizeFilePart(productCode || "")}_${sanitizeFilePart(color || "")}.png`;
+  return prefix ? `${base}/${prefix}/${filename}` : `${base}/${handle}.png`;
+}
+
 function placementArtUrl(templateRef, placement) {
   const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
-  return `${base}/${templateRef}_${placement}.png`;
+  const prefix = sanitizeFilePart(templateRef || "");
+  const filename = `${prefix}_${sanitizeFilePart(placement || "")}.png`;
+  return prefix ? `${base}/${prefix}/${filename}` : `${base}/${templateRef}_${placement}.png`;
 }
 
 function compositePublicBaseUrl() {
@@ -54,7 +64,9 @@ function compositeUploadPluginId() {
 
 function numberArtUrl(templateRef, customNumber) {
   const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
-  return `${base}/${templateRef}_${customNumber}.png`;
+  const prefix = sanitizeFilePart(templateRef || "");
+  const filename = `${prefix}_${sanitizeFilePart(String(customNumber || ""))}.png`;
+  return prefix ? `${base}/${prefix}/${filename}` : `${base}/${templateRef}_${customNumber}.png`;
 }
 
 function configuredNumberKeys() {
@@ -130,6 +142,12 @@ function deriveRemotePathFromSourceUrl(sourceUrl, fileName) {
   } catch {
     return fileName;
   }
+}
+
+// Composite in same directory as design art: designId/compositeFileName
+function compositeRemotePath(templateRef, fileName) {
+  const prefix = sanitizeFilePart(templateRef || "");
+  return prefix ? `${prefix}/${fileName}` : fileName;
 }
 
 async function fetchImageBuffer(url) {
@@ -427,7 +445,7 @@ export default async function handler(req, res) {
       continue;
     }
 
-    const { templateRef, variantKey } = parsed;
+    const { templateRef, productCode, color, variantKey } = parsed;
     const vId = productColorSizeToVariant[variantKey];
     if (!vId) {
       console.log("[shopify-webhook] variant map miss", { sku: li?.sku, variantKey });
@@ -472,8 +490,8 @@ export default async function handler(req, res) {
     }
 
     try {
-      // ---- Upload files first
-      const mainArtUrl = artUrlFromHandle(handle);
+      // ---- Upload files first (prefixed path matches variant-merch: designId/filename.png)
+      const mainArtUrl = mainArtUrlWithPrefix(handle, templateRef, productCode, color);
       const customNumber = extractCustomNumberFromLineItem(li);
       let defaultArtUrl = mainArtUrl;
       console.log("[shopify-webhook] line item custom properties", {
@@ -496,7 +514,7 @@ export default async function handler(req, res) {
         });
         if (numberHead.ok) {
           const compositeName = compositeFileName({ handle, templateRef, customNumber });
-          const remotePath = deriveRemotePathFromSourceUrl(mainArtUrl, compositeName);
+          const remotePath = compositeRemotePath(templateRef, compositeName);
           const compositeBuffer = await buildCompositePng({
             baseUrl: mainArtUrl,
             overlayUrl: customNumberUrl,
