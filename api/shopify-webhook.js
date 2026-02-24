@@ -51,9 +51,9 @@ function mainArtUrlWithPrefix(handle, templateRef, productCode, color) {
 function placementArtUrl(templateRef, placement) {
   const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
   const prefix = String(templateRef || "").trim();
-  const filename = `${sanitizeFilePart(templateRef || "")}_${sanitizeFilePart(placement || "")}.png`;
+  const filename = `${prefix}_${sanitizeFilePart(placement || "")}.png`;
   if (!base) return `${prefix}/${filename}`;
-  return prefix ? `${base}/${encodeURIComponent(prefix)}/${filename}` : `${base}/${templateRef}_${placement}.png`;
+  return prefix ? `${base}/${encodeURIComponent(prefix)}/${encodeURIComponent(filename)}` : `${base}/${templateRef}_${placement}.png`;
 }
 
 function compositePublicBaseUrl() {
@@ -67,9 +67,9 @@ function compositeUploadPluginId() {
 function numberArtUrl(templateRef, customNumber) {
   const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
   const prefix = String(templateRef || "").trim();
-  const filename = `${sanitizeFilePart(templateRef || "")}_${sanitizeFilePart(String(customNumber || ""))}.png`;
+  const filename = `${prefix}_${sanitizeFilePart(String(customNumber || ""))}.png`;
   if (!base) return `${prefix}/${filename}`;
-  return prefix ? `${base}/${encodeURIComponent(prefix)}/${filename}` : `${base}/${templateRef}_${customNumber}.png`;
+  return prefix ? `${base}/${encodeURIComponent(prefix)}/${encodeURIComponent(filename)}` : `${base}/${templateRef}_${customNumber}.png`;
 }
 
 function configuredNumberKeys() {
