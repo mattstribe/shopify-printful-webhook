@@ -39,19 +39,21 @@ function artUrlFromHandle(handle) {
   return `${base}/${handle}.png`;
 }
 
-// Prefixed path (e.g. 26-DivPrev/filename.png) to match variant-merch CDN layout
+// Prefixed path (e.g. 26-DivPrev/filename.png) to match variant-merch CDN layout. Keep prefix case as in R2.
 function mainArtUrlWithPrefix(handle, templateRef, productCode, color) {
   const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
-  const prefix = sanitizeFilePart(templateRef || "");
-  const filename = `${sanitizeFilePart(handle || "")}_${prefix}_${sanitizeFilePart(productCode || "")}_${sanitizeFilePart(color || "")}.png`;
-  return prefix ? `${base}/${prefix}/${filename}` : `${base}/${handle}.png`;
+  const prefix = String(templateRef || "").trim();
+  const filename = `${sanitizeFilePart(handle || "")}_${sanitizeFilePart(templateRef || "")}_${sanitizeFilePart(productCode || "")}_${sanitizeFilePart(color || "")}.png`;
+  if (!base) return `${prefix}/${filename}`; // no base = invalid; caller may still need path
+  return prefix ? `${base}/${encodeURIComponent(prefix)}/${filename}` : `${base}/${filename}`;
 }
 
 function placementArtUrl(templateRef, placement) {
   const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
-  const prefix = sanitizeFilePart(templateRef || "");
-  const filename = `${prefix}_${sanitizeFilePart(placement || "")}.png`;
-  return prefix ? `${base}/${prefix}/${filename}` : `${base}/${templateRef}_${placement}.png`;
+  const prefix = String(templateRef || "").trim();
+  const filename = `${sanitizeFilePart(templateRef || "")}_${sanitizeFilePart(placement || "")}.png`;
+  if (!base) return `${prefix}/${filename}`;
+  return prefix ? `${base}/${encodeURIComponent(prefix)}/${filename}` : `${base}/${templateRef}_${placement}.png`;
 }
 
 function compositePublicBaseUrl() {
@@ -64,9 +66,10 @@ function compositeUploadPluginId() {
 
 function numberArtUrl(templateRef, customNumber) {
   const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
-  const prefix = sanitizeFilePart(templateRef || "");
-  const filename = `${prefix}_${sanitizeFilePart(String(customNumber || ""))}.png`;
-  return prefix ? `${base}/${prefix}/${filename}` : `${base}/${templateRef}_${customNumber}.png`;
+  const prefix = String(templateRef || "").trim();
+  const filename = `${sanitizeFilePart(templateRef || "")}_${sanitizeFilePart(String(customNumber || ""))}.png`;
+  if (!base) return `${prefix}/${filename}`;
+  return prefix ? `${base}/${encodeURIComponent(prefix)}/${filename}` : `${base}/${templateRef}_${customNumber}.png`;
 }
 
 function configuredNumberKeys() {
@@ -144,9 +147,9 @@ function deriveRemotePathFromSourceUrl(sourceUrl, fileName) {
   }
 }
 
-// Composite in same directory as design art: designId/compositeFileName
+// Composite in same directory as design art: designId/compositeFileName (preserve designId case for R2)
 function compositeRemotePath(templateRef, fileName) {
-  const prefix = sanitizeFilePart(templateRef || "");
+  const prefix = String(templateRef || "").trim();
   return prefix ? `${prefix}/${fileName}` : fileName;
 }
 
@@ -333,6 +336,16 @@ export default async function handler(req, res) {
     orderNumber: order.order_number,
     lineItemCount: (order.line_items || []).length,
   });
+
+  const configCheck = {
+    ART_BASE_URL_set: Boolean(process.env.ART_BASE_URL),
+    PRINTFUL_API_TOKEN_set: Boolean(process.env.PRINTFUL_API_TOKEN),
+    PRINTFUL_STORE_ID_set: Boolean(process.env.PRINTFUL_STORE_ID),
+    COMPOSITE_UPLOAD_API_URL_set: Boolean(process.env.COMPOSITE_UPLOAD_API_URL),
+  };
+  trace.config_check = configCheck;
+  if (!configCheck.ART_BASE_URL_set) console.warn("[shopify-webhook] ART_BASE_URL is not set; art URLs will be invalid.");
+  if (!configCheck.PRINTFUL_STORE_ID_set || !configCheck.PRINTFUL_API_TOKEN_set) console.warn("[shopify-webhook] PRINTFUL_STORE_ID or PRINTFUL_API_TOKEN not set; Printful file upload will fail.");
 
   const sa = order.shipping_address || order.customer?.default_address || {};
   const recipient = {
