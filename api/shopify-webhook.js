@@ -39,12 +39,12 @@ function artUrlFromHandle(handle) {
   return `${base}/${handle}.png`;
 }
 
-// Prefixed path (e.g. 26-DivPrev/filename.png) to match variant-merch CDN layout. Keep prefix case as in R2.
+// Prefixed path (e.g. 26-DivPrev/handle.png) to match variant-merch CDN layout. Handle is the full slug (e.g. swede_26-divprev_bc3001_black).
 function mainArtUrlWithPrefix(handle, templateRef, productCode, color) {
   const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
   const prefix = String(templateRef || "").trim();
-  const filename = `${sanitizeFilePart(handle || "")}_${sanitizeFilePart(templateRef || "")}_${sanitizeFilePart(productCode || "")}_${sanitizeFilePart(color || "")}.png`;
-  if (!base) return `${prefix}/${filename}`; // no base = invalid; caller may still need path
+  const filename = `${sanitizeFilePart(handle || "art")}.png`;
+  if (!base) return `${prefix}/${filename}`;
   return prefix ? `${base}/${encodeURIComponent(prefix)}/${filename}` : `${base}/${filename}`;
 }
 
