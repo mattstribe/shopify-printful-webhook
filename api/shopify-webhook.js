@@ -39,11 +39,28 @@ function artUrlFromHandle(handle) {
   return `${base}/${handle}.png`;
 }
 
-// Prefixed path (e.g. 26-DivPrev/handle.png) to match variant-merch CDN layout. Handle is the full slug (e.g. swede_26-divprev_bc3001_black).
+/**
+ * Base filename for design art on the CDN.
+ * variant-merch uploads: {designId}/{teamSlug}_{designId}_{fullProductId}.png (all lowercased/slugged).
+ * fullProductId is productCode + "_" + color as encoded in the structured SKU (middle segments before size).
+ *
+ * MAIN_ART_FILENAME_MODE:
+ * - full (default): {handle}_{templateRef}_{productCode}_{color}.png — use when Shopify handle is team-only (no color).
+ * - handle | legacy: {handle}.png — when the handle still matches the file basename (old stores).
+ */
+function mainArtFileBaseName(handle, templateRef, productCode, color) {
+  const mode = String(process.env.MAIN_ART_FILENAME_MODE || "full").toLowerCase();
+  if (mode === "handle" || mode === "legacy") {
+    return `${sanitizeFilePart(handle || "art")}.png`;
+  }
+  const fullProductId = [productCode, color].filter(Boolean).join("_");
+  return `${sanitizeFilePart(handle || "art")}_${sanitizeFilePart(templateRef)}_${sanitizeFilePart(fullProductId)}.png`;
+}
+
 function mainArtUrlWithPrefix(handle, templateRef, productCode, color) {
   const base = (process.env.ART_BASE_URL || "").replace(/\/+$/, "");
   const prefix = String(templateRef || "").trim();
-  const filename = `${sanitizeFilePart(handle || "art")}.png`;
+  const filename = mainArtFileBaseName(handle, templateRef, productCode, color);
   if (!base) return `${prefix}/${filename}`;
   return prefix ? `${base}/${encodeURIComponent(prefix)}/${filename}` : `${base}/${filename}`;
 }
