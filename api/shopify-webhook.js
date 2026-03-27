@@ -323,6 +323,37 @@ function truncate(value, maxLen = 1200) {
   return `${str.slice(0, maxLen)}...[truncated]`;
 }
 
+/** Catalog variant payload: { variant, product } */
+async function fetchPrintfulCatalogVariant(variantId) {
+  const token = process.env.PRINTFUL_API_TOKEN;
+  const res = await fetch(`https://api.printful.com/products/variant/${variantId}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  const text = await res.text();
+  const parsed = safeJsonParse(text);
+  if (!res.ok) {
+    throw new Error(`Printful catalog variant ${variantId} failed (${res.status}): ${truncate(parsed)}`);
+  }
+  return parsed?.result ?? null;
+}
+
+/**
+ * Yupoong 6245CM (catalog) is EMBROIDERY by default; `default` maps to embroidery and requires thread_colors.
+ * When DTFILM is available, the DTF front slot is typically type/id `front_dtf_hat`.
+ */
+function resolveDtfHatMainFilePlacement(product) {
+  if (!product || typeof product !== "object") return null;
+  const techniques = product.techniques;
+  if (!Array.isArray(techniques) || !techniques.some((t) => t && t.key === "DTFILM")) return null;
+  const files = product.files;
+  if (!Array.isArray(files)) return null;
+  const dtfHat = files.find(
+    (f) => f && (f.type === "front_dtf_hat" || f.id === "front_dtf_hat")
+  );
+  if (!dtfHat?.type) return null;
+  return { fileType: dtfHat.type, technique: "DTFILM" };
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -542,6 +573,32 @@ export default async function handler(req, res) {
       continue;
     }
 
+    let dtfPlacement = null;
+    try {
+      const catalog = await fetchPrintfulCatalogVariant(vId);
+      const product = catalog?.product;
+      dtfPlacement = resolveDtfHatMainFilePlacement(product);
+      trackRequest({
+        type: "printful_catalog_variant",
+        line_item_id: li?.id || null,
+        sku: li?.sku || null,
+        variant_id: vId,
+        product_id: product?.id ?? null,
+        dtf_main_file_type: dtfPlacement?.fileType ?? null,
+      });
+    } catch (e) {
+      console.warn("[shopify-webhook] Printful catalog variant lookup failed", vId, e?.message);
+      trackRequest({
+        type: "printful_catalog_variant_error",
+        line_item_id: li?.id || null,
+        sku: li?.sku || null,
+        variant_id: vId,
+        error: String(e?.message || e),
+      });
+    }
+
+    const mainFilePlacementLabel = dtfPlacement?.fileType || "default";
+
     try {
       // ---- Upload files first (prefixed path matches variant-merch: designId/filename.png)
       const mainArtUrl = mainArtUrlWithPrefix(handle, templateRef, productCode, color);
@@ -609,14 +666,14 @@ export default async function handler(req, res) {
       const mainFileId = await uploadFileToPrintfulTracked(defaultArtUrl, {
         sku: li?.sku || null,
         line_item_id: li?.id || null,
-        placement: "default",
+        placement: mainFilePlacementLabel,
         source: defaultArtUrl === mainArtUrl ? "base_art" : "composite_art",
       });
       if (defaultArtUrl !== mainArtUrl) {
         const fileReady = await waitForPrintfulFileReady(mainFileId, {
           sku: li?.sku || null,
           line_item_id: li?.id || null,
-          placement: "default",
+          placement: mainFilePlacementLabel,
           source: "composite_art",
         });
         trackRequest({
@@ -656,12 +713,15 @@ export default async function handler(req, res) {
         }
       }
 
-      const allFiles = [{ type: "default", id: mainFileId }, ...placementFiles];
-      items.push({
+      const mainFileType = dtfPlacement?.fileType || "default";
+      const allFiles = [{ type: mainFileType, id: mainFileId }, ...placementFiles];
+      const orderItem = {
         variant_id: vId,
         quantity: li.quantity ?? 1,
-        files: allFiles
-      });
+        files: allFiles,
+      };
+      if (dtfPlacement?.technique) orderItem.technique = dtfPlacement.technique;
+      items.push(orderItem);
       trace.line_items.push({
         sku: li?.sku || null,
         line_item_id: li?.id || null,
@@ -677,6 +737,8 @@ export default async function handler(req, res) {
         product_handle: handle,
         default_art_source: defaultArtUrl === mainArtUrl ? "base_art" : "composite_art",
         default_art_url: defaultArtUrl,
+        printful_main_file_type: mainFileType,
+        printful_item_technique: dtfPlacement?.technique || null,
         file_count: allFiles.length,
       });
       console.log("[shopify-webhook] mapped line item", {
