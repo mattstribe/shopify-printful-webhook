@@ -677,11 +677,26 @@ export const productColorSizeToVariant = {
   "BC3001_WHITE_5XL": 12872,
 
   // Gildan 18500 Black Sweatshirt
-  "G18500_BLK_S": 5530,
-  "G18500_BLK_M": 5531,
-  "G18500_BLK_L": 5532,
-  "G18500_BLK_XL": 5533,
-  "G18500_BLK_2XL": 5534,
-  "G18500_BLK_3XL": 5535,
-  "G18500_BLK_4XL": 5536,
+  "G18500_BLACK_S": 5530,
+  "G18500_BLACK_M": 5531,
+  "G18500_BLACK_L": 5532,
+  "G18500_BLACK_XL": 5533,
+  "G18500_BLACK_2XL": 5534,
+  "G18500_BLACK_3XL": 5535,
+  "G18500_BLACK_4XL": 5536,
+
+  // Classic Dad Hat | Yupoong 6245CM (Printful catalog product 206), one size — use OS in SKU
+  // Full list from GET https://api.printful.com/products/206 (11 colors). “Two-tone” UI uses Spruce + Khaki as separate variants.
+  "Y6245CM_BLACK_OS": 7854,
+  "Y6245CM_NAVY_OS": 7857,
+  "Y6245CM_CRANBERRY_OS": 12735,
+  "Y6245CM_SPRUCE_OS": 8745,
+  "Y6245CM_DARKGREY_OS": 12736,
+  "Y6245CM_GREENCAMO_OS": 9794,
+  "Y6245CM_KHAKI_OS": 7855,
+  "Y6245CM_STONE_OS": 7859,
+  "Y6245CM_PINK_OS": 7858,
+  "Y6245CM_LIGHTBLUE_OS": 7856,
+  "Y6245CM_WHITE_OS": 7853,
+
 };
