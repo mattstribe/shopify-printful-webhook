@@ -42,19 +42,42 @@ function artUrlFromHandle(handle) {
 /**
  * Base filename for design art on the CDN.
  * variant-merch uploads: {designId}/{teamSlug}_{designId}_{fullProductId}.png (all lowercased/slugged).
- * fullProductId is productCode + "_" + color as encoded in the structured SKU (middle segments before size).
+ * fullProductId is productCode + "_" + color from the structured SKU (middle segments before size).
+ *
+ * Shopify handles are often team-only (iron-rats) but can be composite without color (iron-rats_26-divprev_bc3001).
+ * If we always did {handle}_{templateRef}_{fullProductId}, composites would duplicate design+product.
  *
  * MAIN_ART_FILENAME_MODE:
- * - full (default): {handle}_{templateRef}_{productCode}_{color}.png — use when Shopify handle is team-only (no color).
- * - handle | legacy: {handle}.png — when the handle still matches the file basename (old stores).
+ * - full (default): derive team slug + build 3-part basename; or handle.png if handle is already the full basename.
+ * - handle | legacy: {handle}.png
  */
 function mainArtFileBaseName(handle, templateRef, productCode, color) {
   const mode = String(process.env.MAIN_ART_FILENAME_MODE || "full").toLowerCase();
   if (mode === "handle" || mode === "legacy") {
     return `${sanitizeFilePart(handle || "art")}.png`;
   }
+  const hSan = sanitizeFilePart(handle || "art");
+  const tSan = sanitizeFilePart(templateRef);
+  const pSan = sanitizeFilePart(productCode);
   const fullProductId = [productCode, color].filter(Boolean).join("_");
-  return `${sanitizeFilePart(handle || "art")}_${sanitizeFilePart(templateRef)}_${sanitizeFilePart(fullProductId)}.png`;
+  const fpSan = sanitizeFilePart(fullProductId);
+
+  // Handle already matches full art basename (e.g. legacy slug that still includes color)
+  const fullBasenameSuffix = `_${tSan}_${fpSan}`;
+  if (fpSan && hSan.endsWith(fullBasenameSuffix)) {
+    return `${hSan}.png`;
+  }
+
+  // Composite handle: team_design_product (no color) — strip suffix so we do not repeat design/product
+  const noColorSuffix = pSan ? `_${tSan}_${pSan}` : "";
+  if (noColorSuffix && hSan.endsWith(noColorSuffix)) {
+    const teamSlug = hSan.slice(0, -noColorSuffix.length);
+    if (teamSlug) {
+      return `${teamSlug}_${tSan}_${fpSan}.png`;
+    }
+  }
+
+  return `${hSan}_${tSan}_${fpSan}.png`;
 }
 
 function mainArtUrlWithPrefix(handle, templateRef, productCode, color) {
