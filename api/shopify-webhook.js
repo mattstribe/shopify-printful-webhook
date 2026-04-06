@@ -359,6 +359,73 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function resetFulfillmentStatus(shopifyOrderId) {
+  const results = { holds: [], cancels: [], errors: [] };
+  try {
+    const foRes = await fetch(
+      `https://${shopDomain()}/admin/api/2025-01/orders/${shopifyOrderId}/fulfillment_orders.json`,
+      { headers: { "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN } }
+    );
+    if (!foRes.ok) {
+      results.errors.push(`FO fetch failed: ${foRes.status}`);
+      return results;
+    }
+    const { fulfillment_orders } = await foRes.json();
+
+    for (const fo of (fulfillment_orders || [])) {
+      if (fo.status === "open") {
+        try {
+          const r = await fetch(
+            `https://${shopDomain()}/admin/api/2025-01/fulfillment_orders/${fo.id}/hold.json`,
+            {
+              method: "POST",
+              headers: {
+                "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                fulfillment_hold: { reason: "other", reason_notes: "Awaiting Printful fulfillment" },
+              }),
+            }
+          );
+          if (r.ok) results.holds.push(fo.id);
+          else results.errors.push(`Hold FO ${fo.id}: ${r.status}`);
+        } catch (e) {
+          results.errors.push(`Hold FO ${fo.id}: ${e.message}`);
+        }
+      }
+    }
+
+    const fRes = await fetch(
+      `https://${shopDomain()}/admin/api/2025-01/orders/${shopifyOrderId}/fulfillments.json`,
+      { headers: { "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN } }
+    );
+    if (fRes.ok) {
+      const { fulfillments } = await fRes.json();
+      for (const f of (fulfillments || [])) {
+        if (f.status === "success" && !f.tracking_number) {
+          try {
+            const r = await fetch(
+              `https://${shopDomain()}/admin/api/2025-01/fulfillments/${f.id}/cancel.json`,
+              {
+                method: "POST",
+                headers: { "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN },
+              }
+            );
+            if (r.ok) results.cancels.push(f.id);
+            else results.errors.push(`Cancel fulfillment ${f.id}: ${r.status}`);
+          } catch (e) {
+            results.errors.push(`Cancel fulfillment ${f.id}: ${e.message}`);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    results.errors.push(`resetFulfillmentStatus: ${e.message}`);
+  }
+  return results;
+}
+
 function isPrintfulExternalIdDuplicate(payload) {
   const code = String(payload?.error?.api_error_code || "");
   if (code === "OR-13") return true;
@@ -438,6 +505,10 @@ export default async function handler(req, res) {
     trace.requests.push(entry);
     console.log("[shopify-webhook][trace]", JSON.stringify(entry));
   };
+
+  const fulfillmentReset = await resetFulfillmentStatus(order.id);
+  trace.fulfillment_reset = fulfillmentReset;
+  trackRequest({ type: "fulfillment_reset", ...fulfillmentReset });
 
   async function uploadFileToPrintfulTracked(fileUrl, context = {}) {
     const storeId = process.env.PRINTFUL_STORE_ID;
