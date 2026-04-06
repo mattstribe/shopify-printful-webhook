@@ -2,6 +2,7 @@ import crypto from "crypto";
 import sharp from "sharp";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { productColorSizeToVariant } from "./variant-map.js";
+import { saveOrderLog } from "./order-log.js";
 
 // ---- Helpers
 function shopDomain() {
@@ -775,6 +776,7 @@ export default async function handler(req, res) {
     console.error("[shopify-webhook] no valid items", { missing, orderId: order.id });
     trace.result = { ok: false, reason: "No valid items" };
     console.log("[shopify-webhook][trace:summary]", JSON.stringify(trace));
+    await saveOrderLog(trace);
     return res.status(200).json(includeTraceInResponse
       ? { ok:false, reason:"No valid items", missing, trace }
       : { ok:false, reason:"No valid items", missing }
@@ -826,6 +828,7 @@ export default async function handler(req, res) {
           code: draftPayload?.error?.api_error_code || null,
         });
         console.log("[shopify-webhook][trace:summary]", JSON.stringify(trace));
+        await saveOrderLog(trace);
         return res.status(200).json(includeTraceInResponse
           ? { ok: true, already_exists: true, external_id: draftOrder.external_id, missing, trace }
           : { ok: true, already_exists: true, external_id: draftOrder.external_id, missing }
@@ -860,6 +863,7 @@ export default async function handler(req, res) {
     console.log("[printful] Order confirmed:", confirmPayload?.result?.id);
     trace.result = { ok: true, printful_order_id: confirmPayload?.result?.id || orderId };
     console.log("[shopify-webhook][trace:summary]", JSON.stringify(trace));
+    await saveOrderLog(trace);
     return res.status(200).json(includeTraceInResponse
       ? { ok: true, draft: draftPayload, confirmed: confirmPayload, missing, trace }
       : { ok: true, draft: draftPayload, confirmed: confirmPayload, missing }
@@ -869,6 +873,7 @@ export default async function handler(req, res) {
     console.error("[printful] Order creation/confirmation failed:", err);
     trace.result = { ok: false, error: String(err) };
     console.log("[shopify-webhook][trace:summary]", JSON.stringify(trace));
+    await saveOrderLog(trace);
     return res.status(200).json(includeTraceInResponse
       ? { ok: false, error: String(err), missing, trace }
       : { ok: false, error: String(err), missing }
