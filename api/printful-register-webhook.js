@@ -55,7 +55,7 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         url: webhookUrl,
         secret,
-        types: ["package_shipped", "order_updated", "order_fulfilled"],
+        types: ["package_shipped", "order_updated"],
         store_id: storeId,
       }),
     });
