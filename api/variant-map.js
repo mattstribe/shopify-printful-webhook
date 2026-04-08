@@ -88,6 +88,11 @@ export const colorHexMap = {
   WHITE: "#FFFFFF",
   // Gildan 18500
   BLK: "#0C0C0C",
+  // Richardson 258 (two-tone)
+  BLACKWHITE: "#282927",
+  KELLYWHITE: "#206B57",
+  LIGHTBLUEWHITE: "#4D617B",
+  WHITEBLACK: "#FFFFFF",
 };
 
 export const productColorSizeToVariant = {
@@ -698,5 +703,12 @@ export const productColorSizeToVariant = {
   "Y6245CM_PINK_OS": 7858,
   "Y6245CM_LIGHTBLUE_OS": 7856,
   "Y6245CM_WHITE_OS": 7853,
+
+  // Classic Rope Cap | Richardson 258 (Printful catalog product 846), one size
+  // Supports DTFILM (DTFlex) and EMBROIDERY techniques. 4 two-tone colorways.
+  "R258_BLACK_OS": 22229,
+  "R258_KELLYWHITE_OS": 46026,
+  "R258_LIGHTBLUEWHITE_OS": 22230,
+  "R258_WHITE_OS": 22231,
 
 };
