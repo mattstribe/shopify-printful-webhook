@@ -711,4 +711,12 @@ export const productColorSizeToVariant = {
   "R258_LIGHTBLUEWHITE_OS": 22230,
   "R258_WHITE_OS": 22231,
 
+  // All-Over Print Headband (Printful catalog product 545), CUT-SEW / sublimation.
+  // Blank fabric is white-only at the catalog level; BLACK vs WHITE here refers to
+  // the design colorway in our art pipeline, both routing to the same Printful variant.
+  "HEADBAND_BLACK_M": 16363,
+  "HEADBAND_BLACK_L": 13802,
+  "HEADBAND_WHITE_M": 16363,
+  "HEADBAND_WHITE_L": 13802,
+
 };

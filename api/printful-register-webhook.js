@@ -55,7 +55,9 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         url: webhookUrl,
         secret,
-        types: ["package_shipped", "order_updated"],
+        // Only subscribe to events we act on. `order_updated` is noisy and carries no
+        // shipment tracking, so it just clutters logs without changing customer outcomes.
+        types: ["package_shipped"],
         store_id: storeId,
       }),
     });

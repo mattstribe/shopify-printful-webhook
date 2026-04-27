@@ -28,44 +28,86 @@ function secureEqual(a, b) {
   return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
-function normalizePfSignature(sigHeader = "") {
+/**
+ * Parse a Printful v2 signature header.
+ * Format: `t=<unix_ts>,s=<hex_hmac>` (may contain extra whitespace).
+ * Also tolerates legacy formats: `sha256=<hex>`, `sha1=<hex>`, `v1=<hex>`,
+ * or a bare token, so switching between registration methods doesn't break.
+ */
+function parsePfSignatureHeader(sigHeader = "") {
   const raw = String(sigHeader || "").trim();
-  if (!raw) return [];
-  const tokens = raw
-    .split(/[,\s]+/)
-    .map(t => t.trim())
-    .filter(Boolean)
-    .map((t) => {
-      const prefixed = t.match(/^(?:sha1|sha256|v1)=([a-f0-9+/=]+)$/i);
-      return prefixed ? prefixed[1] : t;
-    })
-    .map(t => t.replace(/^"|"$/g, ""));
-  return [...new Set(tokens)];
+  if (!raw) return { timestamp: null, signatures: [], rawTokens: [] };
+  const tokens = raw.split(/[,\s]+/).map((t) => t.trim()).filter(Boolean);
+  let timestamp = null;
+  const signatures = [];
+  for (const tok of tokens) {
+    const m = tok.match(/^([a-z0-9_]+)=(.+)$/i);
+    if (!m) {
+      signatures.push(tok.replace(/^"|"$/g, ""));
+      continue;
+    }
+    const key = m[1].toLowerCase();
+    const value = m[2].replace(/^"|"$/g, "");
+    if (key === "t") timestamp = value;
+    else if (key === "s" || key === "sha256" || key === "sha1" || key === "v1") signatures.push(value);
+    else signatures.push(value);
+  }
+  return { timestamp, signatures: [...new Set(signatures)], rawTokens: tokens };
 }
 
+/**
+ * Verify a Printful webhook signature.
+ *
+ * Printful's Developer Dashboard webhooks sign events as:
+ *   X-Pf-Signature: t=<unix_ts>,s=<hex_hmac_sha256>
+ * where the HMAC is computed over `${timestamp}.${rawBody}` using the
+ * endpoint's signing secret (NOT the raw body alone).
+ *
+ * See: https://developers.printful.com/docs/ (Webhook verification)
+ */
 function verifySignature(headers, raw) {
   const sigHeader = String(headers["x-pf-signature"] || "");
   const secret = process.env.PRINTFUL_WEBHOOK_SECRET || "";
   if (!sigHeader || !secret) {
-    return { ok: false, reason: "missing_header_or_secret", meta: { hasSigHeader: Boolean(sigHeader), hasSecret: Boolean(secret) } };
+    return {
+      ok: false,
+      reason: "missing_header_or_secret",
+      meta: { hasSigHeader: Boolean(sigHeader), hasSecret: Boolean(secret) },
+    };
   }
 
-  const provided = normalizePfSignature(sigHeader);
-  const sha256Hex = crypto.createHmac("sha256", secret).update(raw, "utf8").digest("hex");
-  const sha256Base64 = crypto.createHmac("sha256", secret).update(raw, "utf8").digest("base64");
-  const sha1Hex = crypto.createHmac("sha1", secret).update(raw, "utf8").digest("hex");
-  const expected = [sha256Hex, sha256Base64, sha1Hex];
-  const ok = provided.some((p) => expected.some((e) => secureEqual(p, e)));
+  const { timestamp, signatures, rawTokens } = parsePfSignatureHeader(sigHeader);
+
+  const candidates = [];
+  if (timestamp) {
+    const message = `${timestamp}.${raw}`;
+    candidates.push({ format: "pf_v2_hex", value: crypto.createHmac("sha256", secret).update(message, "utf8").digest("hex") });
+    candidates.push({ format: "pf_v2_base64", value: crypto.createHmac("sha256", secret).update(message, "utf8").digest("base64") });
+  }
+  // Legacy/fallback formats (raw-body HMAC) in case an older registration scheme is in use.
+  candidates.push({ format: "sha256_hex", value: crypto.createHmac("sha256", secret).update(raw, "utf8").digest("hex") });
+  candidates.push({ format: "sha256_base64", value: crypto.createHmac("sha256", secret).update(raw, "utf8").digest("base64") });
+  candidates.push({ format: "sha1_hex", value: crypto.createHmac("sha1", secret).update(raw, "utf8").digest("hex") });
+
+  let matched = null;
+  for (const cand of candidates) {
+    for (const sig of signatures) {
+      if (secureEqual(sig, cand.value)) { matched = cand.format; break; }
+    }
+    if (matched) break;
+  }
 
   return {
-    ok,
-    reason: ok ? "matched" : "mismatch",
+    ok: Boolean(matched),
+    reason: matched || (signatures.length === 0 ? "no_signature_tokens" : "mismatch"),
     meta: {
-      headerPreview: sigHeader.slice(0, 24),
-      providedCount: provided.length,
-      providedLens: provided.map(v => v.length),
-      expectedLens: expected.map(v => v.length),
+      headerPreview: sigHeader.slice(0, 96),
+      parsedTimestamp: timestamp,
+      providedCount: signatures.length,
+      providedLens: signatures.map((v) => v.length),
+      rawTokenCount: rawTokens.length,
       bodyLength: raw.length,
+      matchedFormat: matched,
     },
   };
 }
@@ -146,14 +188,28 @@ async function releaseFulfillmentHolds(fulfillmentOrders) {
   return released;
 }
 
-async function updateExistingFulfillmentTracking(orderId, tracking) {
+async function listFulfillments(orderId) {
   const fRes = await fetch(
     `https://${shopDomain()}/admin/api/2025-01/orders/${orderId}/fulfillments.json`,
     { headers: { "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN } }
   );
-  if (!fRes.ok) return { already_fulfilled: true, tracking_updated: false };
+  if (!fRes.ok) return [];
   const { fulfillments } = await fRes.json();
-  const target = (fulfillments || []).find((f) => f.status === "success");
+  return fulfillments || [];
+}
+
+function fulfillmentHasSameTracking(fulfillment, tracking) {
+  const num = String(tracking?.number || "").trim();
+  if (!num) return false;
+  const onNum = String(fulfillment?.tracking_number || "").trim();
+  if (onNum && onNum === num) return true;
+  const nums = Array.isArray(fulfillment?.tracking_numbers) ? fulfillment.tracking_numbers : [];
+  return nums.map((x) => String(x || "").trim()).includes(num);
+}
+
+async function updateExistingFulfillmentTracking(orderId, tracking) {
+  const fulfillments = await listFulfillments(orderId);
+  const target = fulfillments.find((f) => f.status === "success");
   if (!target) return { already_fulfilled: true, tracking_updated: false };
 
   const r = await fetch(
@@ -182,6 +238,18 @@ async function updateExistingFulfillmentTracking(orderId, tracking) {
 }
 
 async function createShopifyFulfillment({ orderId, tracking }) {
+  // Idempotency: if any existing fulfillment already carries this tracking number,
+  // don't create another (which would spam the customer with a duplicate shipping email).
+  const existing = await listFulfillments(orderId);
+  const dup = existing.find((f) => fulfillmentHasSameTracking(f, tracking));
+  if (dup) {
+    console.log("[printful-webhook] duplicate tracking already on fulfillment, skipping", {
+      fulfillment_id: dup.id,
+      tracking_number: tracking?.number,
+    });
+    return { already_fulfilled: true, tracking_updated: false, duplicate: true, fulfillment: dup };
+  }
+
   const allFOs = await getFulfillmentOrders(orderId);
 
   const held = allFOs.filter((fo) => fo.status === "on_hold");
@@ -239,10 +307,26 @@ export default async function handler(req, res) {
 
   if (!debugBypass && !allowUnsigned && !sigCheck.ok) {
     console.error("[printful-webhook] invalid signature", sigCheck.meta);
+    // Persist a rejection log so failures are visible via /api/order-logs instead of silently 401-ing.
+    try {
+      await saveOrderLog({
+        received_at: new Date().toISOString(),
+        source: "printful-webhook",
+        incoming: {
+          shopify_topic: req.headers["x-pf-event"] || null,
+          order_number: "rejected-signature",
+          raw_preview: String(raw || "").slice(0, 1800),
+        },
+        signature_check: { ok: false, reason: sigCheck.reason, meta: sigCheck.meta },
+        result: { ok: false, reason: "invalid_signature" },
+      });
+    } catch (logErr) {
+      console.warn("[printful-webhook] failed to persist rejection log:", logErr?.message);
+    }
     return res.status(401).json({ ok: false, reason: "Invalid signature", meta: sigCheck.meta });
   }
   if (allowUnsigned && !sigCheck.ok) {
-    console.warn("[printful-webhook] signature bypassed by ALLOW_UNSIGNED_PRINTFUL_WEBHOOKS");
+    console.warn("[printful-webhook] signature bypassed by ALLOW_UNSIGNED_PRINTFUL_WEBHOOKS", sigCheck.meta);
   }
 
   let body;
