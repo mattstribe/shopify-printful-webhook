@@ -355,6 +355,25 @@ function resolveDtfHatMainFilePlacement(product) {
   return { fileType: dtfHat.type, technique: "DTFILM" };
 }
 
+/**
+ * Per-product extra `options` to attach to the Printful order item.
+ *
+ * Some catalog products (notably AOP cut-and-sew items) require option values
+ * or the draft order is rejected with a 400 BadRequest. Today this only handles
+ * the All-Over Print Headband (product 545) which mandates `stitch_color`
+ * (white|black). The stitch tracks the design colorway encoded in the SKU so
+ * the visible seam blends with the printed artwork.
+ */
+function buildOrderItemOptions({ productCode, color }) {
+  const code = String(productCode || "").toUpperCase();
+  const colorKey = String(color || "").toUpperCase();
+  if (code === "HEADBAND") {
+    const stitch = colorKey === "BLACK" ? "black" : "white";
+    return [{ id: "stitch_color", value: stitch }];
+  }
+  return [];
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -793,6 +812,14 @@ export default async function handler(req, res) {
         files: allFiles,
       };
       if (dtfPlacement?.technique) orderItem.technique = dtfPlacement.technique;
+
+      // All-Over Print Headband (Printful product 545) requires a `stitch_color`
+      // option (white|black) on the order item or the draft is rejected. We match
+      // the stitch to the design colorway encoded in the SKU so the seam blends
+      // with the printed art.
+      const itemOptions = buildOrderItemOptions({ productCode, color });
+      if (itemOptions.length > 0) orderItem.options = itemOptions;
+
       items.push(orderItem);
       trace.line_items.push({
         sku: li?.sku || null,
@@ -811,6 +838,7 @@ export default async function handler(req, res) {
         default_art_url: defaultArtUrl,
         printful_main_file_type: mainFileType,
         printful_item_technique: dtfPlacement?.technique || null,
+        printful_item_options: itemOptions.length > 0 ? itemOptions : null,
         file_count: allFiles.length,
       });
       console.log("[shopify-webhook] mapped line item", {
