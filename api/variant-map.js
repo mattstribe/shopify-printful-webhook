@@ -681,7 +681,7 @@ export const productColorSizeToVariant = {
   "BC3001_WHITE_4XL": 5309,
   "BC3001_WHITE_5XL": 12872,
 
-  // Gildan 18500 Black Sweatshirt
+  // Gildan 18500 Sweatshirt
   "G18500_BLACK_S": 5530,
   "G18500_BLACK_M": 5531,
   "G18500_BLACK_L": 5532,
@@ -689,6 +689,14 @@ export const productColorSizeToVariant = {
   "G18500_BLACK_2XL": 5534,
   "G18500_BLACK_3XL": 5535,
   "G18500_BLACK_4XL": 5536,
+  "G18500_ASH_S": 20544,
+  "G18500_ASH_M": 20547,
+  "G18500_ASH_L": 20550,
+  "G18500_ASH_XL": 20553,
+  "G18500_ASH_2XL": 20556,
+  "G18500_ASH_3XL": 20559,
+  "G18500_ASH_4XL": 20562,
+  "G18500_ASH_5XL": 20565,
 
   // Cotton Heritage M2580 premium pullover hoodie (Printful catalog product 380)
   "CHM2580_ADOBE_2XL": 24991,
