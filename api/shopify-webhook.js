@@ -508,7 +508,9 @@ export default async function handler(req, res) {
   const sa = order.shipping_address || order.customer?.default_address || {};
   const recipient = {
     name: [sa.first_name, sa.last_name].filter(Boolean).join(" ") || order.customer?.first_name || "Customer",
+    company: sa.company || "",
     address1: sa.address1 || "N/A",
+    address2: sa.address2 || "",
     city: sa.city || "N/A",
     state_code: sa.province_code || sa.province || "",
     country_code: sa.country_code || sa.country || "US",
